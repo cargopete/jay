@@ -402,3 +402,29 @@ states rather than two: `OFF` for a channel never asked for, `STARTING` for the
 first few seconds, `NO FRAMES` in ember for a channel that was asked for and
 has delivered nothing, and `STALLED` for one whose frames have stopped. Only
 the first is not a fault.
+
+## The two channels need different words for the same silence
+
+The meters shipped calling any channel that had delivered frames and then
+stopped `STALLED`, in ember. On the first real session with headphones on, the
+system channel read `STALLED` throughout — correctly, by that definition, and
+uselessly, because an idle output tap produces no callbacks and the panel would
+therefore have flapped between `SPEECH` and a fault light at every pause in the
+conversation.
+
+A microphone and a process tap are different instruments and absence means
+opposite things on them:
+
+- A live microphone delivers frames whether or not anyone is speaking. Measured
+  at 248 frames in a silent room. So silence there is a real fault, and is
+  drawn as one.
+- A process tap delivers nothing at all when the output is idle. A quiet call
+  and a dead tap are indistinguishable from inside the panel and always will
+  be. `jay check`, run with something playing, is the only instrument that can
+  tell them apart.
+
+So the system channel says `IDLE` and `NO AUDIO YET` in faint ink, and only the
+microphone gets ember. **A warning light that is on during normal operation is
+not a warning light**, and the cost of getting this wrong is not a cosmetic
+one: it trains you to ignore the exact indicator that was added to catch a
+fault you had already lost an evening to.

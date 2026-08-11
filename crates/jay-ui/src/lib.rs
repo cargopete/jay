@@ -289,20 +289,34 @@ impl Overlay {
                 ui.painter().rect_filled(fill, 1.0, colour);
             }
 
-            // The word beside the meter is the diagnosis, and these are
-            // genuinely different faults with different fixes.
+            // The word beside the meter is the diagnosis. The two channels
+            // need different words, because absence means opposite things on
+            // them and calling both "stalled" cries wolf once a minute.
+            //
+            // A live microphone delivers frames whether or not anyone is
+            // speaking — measured at 248 frames in a silent room — so silence
+            // there is genuinely a fault and is drawn as one.
+            //
+            // A CoreAudio process tap delivers no callbacks at all when the
+            // output is idle. Not silent frames: none. So a quiet call and a
+            // dead tap are indistinguishable from here and always will be, and
+            // painting that in ember would be a fault light wired to a pause
+            // in the conversation. `jay check`, with something playing, is the
+            // instrument that can actually tell the difference.
             let waited = self.started.elapsed() > SETTLE;
+            let live_mic = channel == jay_audio::Channel::Mic;
             let (word, tint) = match (self.expected[slot], ever_ran, reading.running) {
                 // Never asked for. Correct, and not a fault.
                 (false, _, _) => ("off", INK_FAINT),
-                // Asked for, and has never delivered a frame. Give the device
-                // a moment to start before calling it dead, then say so
-                // loudly, because this is the state that wasted an evening.
-                (true, false, _) if waited => ("no frames", EMBER),
-                (true, false, _) => ("starting", INK_FAINT),
-                (true, true, false) => ("stalled", EMBER),
                 (true, true, true) if reading.speaking => ("speech", VERDIGRIS),
                 (true, true, true) => ("quiet", INK_FAINT),
+                (true, _, false) if !waited => ("starting", INK_FAINT),
+                // Delivered, then stopped.
+                (true, true, false) if live_mic => ("stalled", EMBER),
+                (true, true, false) => ("idle", INK_FAINT),
+                // Asked for, and has never delivered a single frame.
+                (true, false, _) if live_mic => ("no frames", EMBER),
+                (true, false, _) => ("no audio yet", INK_FAINT),
             };
             ui.label(
                 egui::RichText::new(word.to_uppercase())
