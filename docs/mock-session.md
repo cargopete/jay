@@ -5,16 +5,19 @@ a partner playing interviewer.
 
 ## Before they arrive
 
-**Decide where the interviewer's voice comes from.** This is the one setting
-that changes how jay behaves, and getting it wrong is silent rather than loud.
+**The interviewer is on a call**, so their voice arrives on system audio and
+yours on the microphone. jay uses that to tell you apart, which matters more
+than it sounds: it means your own thinking aloud is recorded as context but
+never mistaken for a question, and most of what you say while solving something
+is thinking aloud.
 
-- **Same room.** Both voices arrive on the microphone. jay cannot tell you
-  apart, says so in the panel, and treats every question as worth answering.
-  Run with `--source mic`. Nothing else to do.
-- **Over a call.** Their voice arrives on system audio and yours on the mic, so
-  jay knows who is asking. Better: it will ignore your own thinking aloud, which
-  is most of what you say while solving something. Run with `--source both`,
-  which needs the LaunchServices dance below.
+That needs `--source both`, and system audio needs the LaunchServices launch
+below. Launch it from a shell instead and macOS feeds the tap an unbroken
+stream of zeros — no error, no warning, it simply never hears her.
+
+(If you ever do run in the same room, use `--source mic`. jay will say in the
+panel that it cannot tell who is speaking and treat every question as worth
+answering, which is the honest fallback.)
 
 **Warm the cache.** The first `claude -p` call of the hour costs about
 $0.025 and every one after it about $0.003, because the CLI's ~29,000-token
@@ -35,31 +38,36 @@ $EDITOR brief.md          # fill in "Who you are", delete the rest
 
 ## Launching
 
-**Same room, panel on top of your editor:**
-
 ```sh
-jay transcribe --overlay --brief brief.md --mode coding --seconds 0
-```
-
-**Over a call**, system audio needs LaunchServices or macOS silently feeds jay
-an unbroken stream of zeros — it does not error, it just hears nothing:
-
-```sh
-scripts/bundle.sh release
+scripts/bundle.sh release          # re-run this after every rebuild
 open -a "$PWD/target/release/jay.app" --args \
-  transcribe --overlay --source both --brief brief.md --mode coding --seconds 0
+  transcribe --overlay --source both \
+  --mode coding --brief brief.md \
+  --save part1.txt --seconds 0
 ```
 
-`--seconds 0` runs until you close the panel.
+`scripts/bundle.sh` **copies** the binary, so a bundle built before your last
+`cargo build` runs the old code. This has already caught me out once.
+
+`--seconds 0` runs until you close the panel. `--save` is not optional in
+practice: `open -a` detaches jay from the terminal and takes stdout with it, so
+without it the only record is what fits in the panel — and the debrief
+afterwards wants the whole session.
+
+Start a second run with `--mode system-design --save part2.txt` for part two.
 
 ## During
 
-Press **ask jay** when you want the answer. That sends the pinned problem, the
-recent conversation and a screenshot of the focused window — so if the question
-is about the code you are looking at, look at it before you press.
+**jay never volunteers.** It listens, transcribes and stays quiet until you
+press **ask jay**, and there is no setting that changes that. Nothing is spent
+you did not ask for, and a panel that only speaks when spoken to is one you can
+forget is running.
 
-Add `--assist` at launch if you also want jay to volunteer suggestions when it
-hears a question. It is off by default: listening is free, suggesting is not.
+Pressing it sends the pinned problem, the recent conversation, and a screenshot
+of the focused window — so if the question is about the code you are looking at,
+look at it before you press. It picks what to answer by walking back for the
+most recent thing the interviewer actually asked, rather than taking the last
+line, which is usually you mid-sentence.
 
 Switch modes between parts. `--mode coding` gives compiling Rust, the
 complexity and the edge cases; `--mode system-design` gives capacity numbers, a
@@ -101,8 +109,7 @@ it can overshoot by the cost of whatever was in flight.
 not, and you are on `--source both`, you almost certainly launched from a shell
 instead of through `open -a`, and macOS is feeding the tap silence.
 
-**Suggestions never fire on their own.** You did not pass `--assist`. Use the
-button, which always works.
+**Suggestions never fire on their own.** By design. Press the button.
 
 **"still thinking about the last one".** A suggestion takes up to twenty
 seconds and only one runs at a time. This is deliberate: the alternative is the

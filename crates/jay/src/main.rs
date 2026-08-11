@@ -176,26 +176,27 @@ enum Command {
         /// Show the transcript in a floating overlay instead of the terminal.
         #[arg(long)]
         overlay: bool,
-        /// Offer suggestions when someone asks a question.
-        ///
-        /// Off by default: listening is free, suggesting is not.
-        #[arg(long)]
-        assist: bool,
-        /// What kind of help to offer, when assisting.
+        /// What kind of help to offer when you press the button.
         #[arg(long, value_enum, default_value_t = AskMode::Pairing)]
         mode: AskMode,
         /// Hard ceiling on what this session may spend, in dollars.
         #[arg(long, default_value_t = 2.0)]
         budget: f64,
-        /// Minimum seconds between suggestions.
-        #[arg(long, default_value_t = 30)]
-        cooldown: u64,
         /// Standing context for the session: a job spec, a CV, an RFC.
         ///
         /// Read once at startup and sent with every suggestion. The single
         /// cheapest way to stop suggestions reading generic.
         #[arg(long)]
         brief: Option<std::path::PathBuf>,
+        /// Append the transcript here as it happens.
+        ///
+        /// Two reasons. The debrief afterwards wants the whole session, and
+        /// `jay ask --mode rehearsal --context <this file>` is the point of
+        /// the exercise. And when jay is launched through `open -a` for the
+        /// system audio permission, LaunchServices takes stdout with it, so
+        /// this is the only way to see what happened.
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
     },
 }
 
@@ -222,22 +223,20 @@ fn main() -> Result<()> {
             model,
             seconds,
             overlay,
-            assist,
             mode,
             budget,
-            cooldown,
             brief,
+            save,
         } => transcribe(
             source,
             device.map(Into::into),
             model,
             seconds,
             overlay,
-            assist.then(|| Assist {
+            Assist {
                 mode: mode.into(),
                 budget_usd: budget,
-                cooldown: Duration::from_secs(cooldown),
-            }),
+            },
             match brief {
                 Some(path) => Some(
                     std::fs::read_to_string(&path)
@@ -245,6 +244,7 @@ fn main() -> Result<()> {
                 ),
                 None => None,
             },
+            save,
         ),
         Command::File { path, model } => transcribe_file(&path, model),
         Command::Brief { out, from, matches } => brief(&out, from.as_deref(), &matches),
@@ -357,14 +357,62 @@ fn transcribe(
     model: Model,
     seconds: u64,
     overlay: bool,
-    assist: Option<Assist>,
+    assist: Assist,
     brief: Option<String>,
+    save: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Everything downstream reads one line channel, so the terminal and the
     // overlay are just two consumers of the same stream rather than two paths
     // through the pipeline.
     let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
     let (request_tx, request_rx) = crossbeam_channel::bounded::<jay_ui::Request>(2);
+
+    // Tee the line stream to disk. Its own consumer rather than a branch in
+    // each renderer, so the transcript is identical whether you ran with the
+    // panel or without.
+    let (line_tx, saver) = match save {
+        Some(path) => {
+            let (save_tx, save_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
+            // Moved, not cloned. A clone would leave the original sender alive
+            // in this scope — shadowed by the binding below but never dropped
+            // — so the renderer's receiver would never close and the join at
+            // the end would wait forever. Shadowing is not dropping.
+            let forward = line_tx;
+            let handle = std::thread::Builder::new()
+                .name("jay-save".into())
+                .spawn(move || {
+                    use std::io::Write;
+                    let mut file = match std::fs::File::create(&path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::error!(%e, path = %path.display(), "could not open the transcript");
+                            return;
+                        }
+                    };
+                    for line in save_rx {
+                        let written = match line.kind {
+                            jay_ui::Kind::Transcript => {
+                                writeln!(file, "{}: {}", line.speaker, line.text)
+                            }
+                            jay_ui::Kind::Suggestion => {
+                                writeln!(file, "\n--- jay ---\n{}\n-----------\n", line.text)
+                            }
+                            jay_ui::Kind::Notice => writeln!(file, "({})", line.text),
+                        };
+                        if written.is_err() {
+                            return;
+                        }
+                        let _ = file.flush();
+                        if forward.send(line).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .context("spawning the transcript writer")?;
+            (save_tx, Some(handle))
+        }
+        None => (line_tx, None),
+    };
 
     if !overlay {
         let printer = std::thread::Builder::new()
@@ -402,6 +450,9 @@ fn transcribe(
             None,
             brief,
         );
+        if let Some(handle) = saver {
+            let _ = handle.join();
+        }
         let _ = printer.join();
         return result;
     }
@@ -465,12 +516,10 @@ const HALLUCINATION_FLOOR: f32 = 0.01;
 struct Assist {
     mode: jay_agent::Mode,
     /// Hard ceiling on what one session may spend, in dollars.
-    budget_usd: f64,
-    /// Minimum gap between suggestions.
     ///
-    /// Without this, three questions in quick succession are three
-    /// simultaneous escalations and roughly sixty cents.
-    cooldown: Duration,
+    /// A soft ceiling in truth: checked before a call rather than during one,
+    /// so a session overshoots by whatever was in flight.
+    budget_usd: f64,
 }
 
 /// A question plus the conversation around it.
@@ -559,7 +608,7 @@ fn run_pipeline(
     model: Model,
     seconds: u64,
     lines: crossbeam_channel::Sender<jay_ui::Line>,
-    assist: Option<Assist>,
+    assist: Assist,
     requests: Option<crossbeam_channel::Receiver<jay_ui::Request>>,
     brief: Option<String>,
 ) -> Result<()> {
@@ -595,18 +644,13 @@ fn run_pipeline(
     ));
     let problem: PinnedProblem = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-    // The assistant runs whenever anything can ask it: the automatic gate
-    // (`--assist`) or the panel's button. The button is the primary trigger, so
-    // it must work even when the automatic gate is off — an explicit press is
-    // exactly the case `--assist`'s caution exists to protect against.
-    let settings = assist.unwrap_or(Assist {
-        mode: jay_agent::Mode::Pairing,
-        budget_usd: 2.0,
-        cooldown: Duration::from_secs(30),
-    });
-    let wanted = assist.is_some() || requests.is_some();
+    // jay never volunteers. Suggestions happen when you press the button and
+    // at no other time: nothing is spent that you did not ask for, there are no
+    // false positives to tune away, and a panel that only speaks when spoken to
+    // is a panel you can forget is running.
+    let settings = assist;
 
-    let (question_tx, assistant) = match wanted.then_some(settings) {
+    let (question_tx, assistant) = match requests.is_some().then_some(settings) {
         Some(settings) => {
             let (tx, rx) = crossbeam_channel::bounded::<Ask>(4);
             let handle = spawn_assistant(
@@ -617,35 +661,18 @@ fn run_pipeline(
                 lines.clone(),
             )?;
             let _ = lines.send(jay_ui::Line::notice(format!(
-                "{} in {:?} mode, up to ${:.2} this session",
-                if assist.is_some() {
-                    "assisting automatically"
-                } else {
-                    "ready when you press ask jay"
-                },
-                settings.mode,
-                settings.budget_usd
+                "ready in {:?} mode, up to ${:.2} this session. I will not say \
+                 anything until you press ask jay.",
+                settings.mode, settings.budget_usd
             )));
             (Some(tx), Some(handle))
         }
         None => (None, None),
     };
-    let cooldown = settings.cooldown;
-    let auto_gate = assist.is_some();
-
     // Speaker attribution only works when the two voices arrive on different
-    // channels. In a room, the interviewer's voice comes through the same
-    // microphone as yours, and treating everything as "you" would mean the
-    // gate never fires — the questions would all look like thinking aloud.
-    // With one channel we cannot tell, so we do not pretend to.
+    // channels. In a room they share the microphone and we cannot tell, which
+    // costs the focus-picking below some accuracy but nothing else.
     let attribute_speakers = source.uses_system() && source.uses_mic();
-    if auto_gate && !attribute_speakers {
-        let _ = lines.send(jay_ui::Line::notice(
-            "one audio channel, so I cannot tell who is speaking. Treating \
-             every question as worth answering."
-                .to_string(),
-        ));
-    }
 
     // Hand-asked suggestions. The most valuable trigger there is: nothing is
     // spent that was not asked for, and the screen at the moment of the click
@@ -678,10 +705,25 @@ fn run_pipeline(
                         }
                     };
 
+                    // Pick what to answer. The last line is often you
+                    // mid-sentence, so walk back for the most recent thing the
+                    // interviewer actually asked; the gate already knows how to
+                    // tell a real question from "do you see the invitation?".
                     let question = context
-                        .last()
-                        .cloned()
+                        .iter()
+                        .rev()
+                        .find_map(|line| {
+                            let body = line.split_once(": ").map_or(line.as_str(), |(_, r)| r);
+                            let asked_by_them = line.starts_with("them: ")
+                                || line.starts_with("PROBLEM: ");
+                            asked_by_them
+                                .then(|| jay_agent::gate::classify(body))
+                                .flatten()
+                                .map(|_| body.to_string())
+                        })
+                        .or_else(|| context.last().cloned())
                         .unwrap_or_else(|| "(nothing has been said yet)".to_string());
+                    tracing::info!(question = %question, "hand-asked");
 
                     // Blocking here would be less catastrophic than in the
                     // transcriber, but the button should say so rather than
@@ -706,7 +748,6 @@ fn run_pipeline(
             let history = std::sync::Arc::clone(&history);
             let problem = std::sync::Arc::clone(&problem);
             move || {
-            let mut last_suggestion: Option<Instant> = None;
             for utterance in utterance_rx {
                 let spoken = utterance.duration();
                 let result = match whisper.transcribe(&utterance.samples) {
@@ -770,58 +811,6 @@ fn run_pipeline(
 
                 // The gate runs before the line is even displayed, so a
                 // question starts its (slow) escalation as early as possible.
-                if auto_gate
-                    && let Some(tx) = &question_tx
-                    && let Some(trigger) = jay_agent::gate::classify_from(
-                        &result.text,
-                        if attribute_speakers {
-                            match utterance.channel {
-                                Channel::Mic => jay_agent::gate::Speaker::You,
-                                Channel::System => jay_agent::gate::Speaker::Them,
-                            }
-                        } else {
-                            jay_agent::gate::Speaker::Them
-                        },
-                    )
-                {
-                    let asked = match trigger {
-                        jay_agent::gate::Trigger::Question(q)
-                        | jay_agent::gate::Trigger::Addressed(q)
-                        | jay_agent::gate::Trigger::Event(q) => q,
-                    };
-                    let ready = last_suggestion
-                        .map(|at: Instant| at.elapsed() >= cooldown)
-                        .unwrap_or(true);
-                    if ready {
-                        last_suggestion = Some(Instant::now());
-                        let context = with_problem(&problem, &history);
-                        // `try_send`, never `send`. A suggestion takes twenty
-                        // seconds; blocking here to queue one stalls the
-                        // transcriber, which fills the utterance channel,
-                        // which stalls the capture loop, which overflows the
-                        // audio ring. That chain cost 34,048 samples of a real
-                        // recording — about 0.7s of speech — and the symptom
-                        // (dropped samples) appears four layers away from the
-                        // cause. Audio never waits for the expensive path.
-                        if tx
-                            .try_send(Ask {
-                                question: asked,
-                                context,
-                                screenshot: None,
-                            })
-                            .is_err()
-                        {
-                            tracing::debug!("assistant busy; skipped this question");
-                            let _ = lines.send(jay_ui::Line::notice(
-                                "still thinking about the last one, so I let this go by"
-                                    .to_string(),
-                            ));
-                        }
-                    } else {
-                        tracing::debug!("gate fired but the cooldown has not elapsed");
-                    }
-                }
-
                 if lines
                     .send(jay_ui::Line::transcript(
                         utterance.channel.label(),
@@ -881,8 +870,11 @@ fn run_pipeline(
     drop(utterance_tx);
     let _ = worker.join();
     if let Some(handle) = assistant {
-        // The worker owned the only question sender, so the assistant's loop
-        // ends on its own now that the worker has finished.
+        // Drop our sender *before* joining. The assistant's loop ends when the
+        // question channel closes, and this scope holds one of the senders —
+        // joining first waits on a channel that can never close. That was a
+        // real deadlock: `transcribe --seconds 5` ran until it was killed.
+        drop(question_tx);
         let _ = handle.join();
     }
 

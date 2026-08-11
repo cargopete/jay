@@ -28,6 +28,14 @@ pub enum Trigger {
     Addressed(String),
     /// A deterministic event: a test went red, a stack trace appeared.
     Event(String),
+    /// You said something that means you are stuck.
+    ///
+    /// Distinct from a question you asked yourself while thinking, which is
+    /// most of what anyone says while solving a problem and is not a request
+    /// for help. "Um, I think that, um" is working. "I'm not sure how to
+    /// handle the boundary" is being stuck, and that is the moment worth
+    /// interrupting for.
+    Stuck(String),
 }
 
 /// Words that open a question often enough to be worth acting on, without
@@ -58,6 +66,33 @@ const SMALL_TALK: &[&str] = &[
     // Confirmations about the call itself. Kept specific rather than matching
     // a bare "today", which would swallow legitimate questions about work.
     "another interview", "for today", "i assume we", "setup still",
+];
+
+/// Admissions of being stuck, said about your own work.
+///
+/// Deliberately explicit. Hesitation markers — "um", "uh", "I think" — are the
+/// texture of ordinary thinking and firing on them would mean firing
+/// constantly. These are statements that you have run out of road.
+const STUCK_MARKERS: &[&str] = &[
+    "i'm not sure how",
+    "im not sure how",
+    "i'm not sure what",
+    "i don't know how",
+    "i dont know how",
+    "i don't remember",
+    "i can't remember",
+    "i cant remember",
+    "i'm stuck",
+    "im stuck",
+    "i've forgotten",
+    "i forget how",
+    "is there a way to",
+    "what's the name of",
+    "whats the name of",
+    "i'm blanking",
+    "im blanking",
+    "i have no idea",
+    "no idea how",
 ];
 
 /// Minimum words before a question is worth escalating.
@@ -117,11 +152,16 @@ pub fn classify_from(text: &str, speaker: Speaker) -> Option<Trigger> {
         }));
     }
 
-    // Past this point only the other person's questions are acted on. Yours
-    // are you thinking aloud; jay hears them, records them as context, and
-    // keeps its mouth shut unless you say its name.
+    // Your own speech is always recorded as context. What it does not do is
+    // fire a suggestion every time you mutter a question at yourself, because
+    // that is most of what anyone says while solving something. The exception
+    // is saying, in as many words, that you are stuck — which is exactly the
+    // moment worth interrupting for.
     if speaker == Speaker::You {
-        return None;
+        return STUCK_MARKERS
+            .iter()
+            .any(|marker| normalised.contains(marker))
+            .then(|| Trigger::Stuck(text.trim().to_string()));
     }
 
     if normalised.split_whitespace().count() < MIN_QUESTION_WORDS {
@@ -251,6 +291,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn saying_you_are_stuck_asks_for_help() {
+        for line in [
+            "I'm not sure how to handle the boundary case here",
+            "hmm, I can't remember the name of that trait",
+            "is there a way to do this without allocating",
+            "I have no idea why the borrow checker is complaining",
+        ] {
+            assert!(
+                matches!(classify_from(line, Speaker::You), Some(Trigger::Stuck(_))),
+                "should have offered help: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_hesitation_is_not_being_stuck() {
+        // Verbatim and near-verbatim from the real transcript. This is what
+        // working sounds like, and interrupting it would be maddening.
+        for line in [
+            "Um. I, well, I, I think that, um.",
+            "So I'd scan every cell, and, uh, when I hit a one I'd, um, recurse",
+            "yeah so that's, that's linear I think",
+        ] {
+            assert_eq!(
+                classify_from(line, Speaker::You),
+                None,
+                "should have kept quiet: {line}"
+            );
+        }
     }
 
     #[test]
