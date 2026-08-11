@@ -46,7 +46,7 @@ pub enum Target {
 /// made; a directory quietly filling with screenshots of someone's work is
 /// exactly the thing this tool should not do.
 pub fn capture(_target: Target, into: &Path) -> Result<PathBuf> {
-    let path = into.join(format!("jay-capture-{}.png", std::process::id()));
+    let path = into.join(format!("jay-capture-{}.jpg", std::process::id()));
 
     // In process, via the shim, rather than shelling out to
     // `/usr/sbin/screencapture`. The subprocess version works from a terminal
@@ -69,7 +69,7 @@ mod tests {
         // Not a capture test — that needs permission and a screen. This only
         // pins the naming, so two jays never fight over one path.
         let dir = std::path::Path::new("/tmp");
-        let expected = dir.join(format!("jay-capture-{}.png", std::process::id()));
+        let expected = dir.join(format!("jay-capture-{}.jpg", std::process::id()));
         assert!(expected.to_string_lossy().contains("jay-capture-"));
     }
 

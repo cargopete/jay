@@ -102,8 +102,8 @@ pub fn run(
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("jay")
-            .with_inner_size([440.0, 320.0])
-            .with_min_inner_size([280.0, 140.0])
+            .with_inner_size([600.0, 460.0])
+            .with_min_inner_size([360.0, 200.0])
             .with_transparent(true)
             .with_decorations(false)
             .with_always_on_top(),
@@ -127,6 +127,9 @@ struct Overlay {
     /// suggestion takes twelve seconds at best; a button that looks idle for
     /// twelve seconds gets pressed again.
     waiting_since: Option<Instant>,
+    /// When speech last arrived. Powers the intake lamp, which reports
+    /// liveness and is therefore lit by the thing it reports on.
+    last_signal: Option<Instant>,
 }
 
 impl Overlay {
@@ -139,9 +142,19 @@ impl Overlay {
         // Dark, translucent, and low contrast enough to sit over a terminal
         // without becoming the thing you look at.
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgba_unmultiplied(16, 18, 22, 220);
-        visuals.window_fill = visuals.panel_fill;
+        visuals.panel_fill = IRON;
+        visuals.window_fill = IRON;
+        visuals.override_text_color = Some(INK);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, SEAM);
         cc.egui_ctx.set_visuals(visuals);
+
+        // Monospace is the body face, not an accent: an instrument panel is
+        // set in the face the machine can print.
+        cc.egui_ctx.all_styles_mut(|style| {
+            for (_, id) in style.text_styles.iter_mut() {
+                id.family = egui::FontFamily::Monospace;
+            }
+        });
 
         Self {
             rx,
@@ -150,14 +163,87 @@ impl Overlay {
             model_name,
             started: Instant::now(),
             waiting_since: None,
+            last_signal: None,
         }
     }
 }
 
+// Palette from the steampunk-ui doctrine: soot and lamp-oil surfaces, warm
+// ink, three signal metals with three distinct jobs, and status colours taken
+// from what those metals do when they corrode rather than imported from a
+// framework. Brass, not gold.
+
+/// Panel ground. `--iron`: this is a plate, not the page.
+const IRON: egui::Color32 = egui::Color32::from_rgb(0x1c, 0x18, 0x13);
+/// `--iron-2`: header strips and the compartment a reading sits in.
+const IRON_2: egui::Color32 = egui::Color32::from_rgb(0x24, 0x1f, 0x18);
+/// `--seam`: hairlines.
+const SEAM: egui::Color32 = egui::Color32::from_rgb(0x3a, 0x32, 0x27);
+/// `--seam-lit`: structural borders.
+const SEAM_LIT: egui::Color32 = egui::Color32::from_rgb(0x4d, 0x42, 0x31);
+/// `--ink`: body text.
+const INK: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xdf, 0xcd);
+/// `--ink-faint`: labels, units, captions.
+const INK_FAINT: egui::Color32 = egui::Color32::from_rgb(0x9d, 0x8f, 0x75);
+/// `--copper`: **data**. What was said, and who said it.
+const COPPER: egui::Color32 = egui::Color32::from_rgb(0xcd, 0x7c, 0x48);
+/// `--brass`: **structure**. Labels, framing, the accent.
+const BRASS: egui::Color32 = egui::Color32::from_rgb(0xc9, 0xa2, 0x27);
+/// `--brass-hi`: **attention**. Scarce by rule — under five percent of surface.
+const BRASS_HI: egui::Color32 = egui::Color32::from_rgb(0xf0, 0xd8, 0x91);
+/// Not a text colour: engraved edges and the lever's border.
+const BRASS_LO: egui::Color32 = egui::Color32::from_rgb(0x7d, 0x63, 0x18);
+/// Copper carbonate. Live, receiving.
+const VERDIGRIS: egui::Color32 = egui::Color32::from_rgb(0x5f, 0x9e, 0x7d);
+/// Hot iron. Working.
+const EMBER: egui::Color32 = egui::Color32::from_rgb(0xe8, 0x92, 0x2a);
+
+/// Alpha of the window. Enough to read against anything, with just enough
+/// translucency to remember it is sitting on top of something.
+///
+/// This started fully transparent, on the theory that an overlay should blend.
+/// eframe 0.36's `ui()` API paints no background of its own — the
+/// `CentralPanel` used to do it — so "blend" meant bare text floating over a
+/// terminal, completely unreadable. A panel you cannot read is not a subtle
+/// panel.
+const GROUND_ALPHA: f32 = 0.97;
+
+/// How recently a line must have arrived for the intake lamp to be lit.
+///
+/// The lamp reports liveness and is powered by the thing it reports on: lit
+/// when speech is arriving, dark when it is not. It is never green-for-nothing.
+const LIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(12);
+
+// Type scale. Bimodal on purpose — small tracked labels against large
+// readings, with almost nothing between, which is where the instrument-panel
+// feel lives. Both ends are larger than a web page would use: this is a small
+// panel read at a glance, mid-sentence, while someone is waiting for you.
+
+/// Transcript lines and the body of a reading. The size that matters.
+const BODY: f32 = 16.0;
+/// Stencilled labels: units, captions, the model name.
+const LABEL: f32 = 11.0;
+/// Speaker attribution and compartment headings.
+const HEADING: f32 = 13.0;
+/// The nameplate.
+const NAMEPLATE: f32 = 16.0;
+
+/// A tracked uppercase label, the way a stencil does it.
+fn stencil(text: &str) -> egui::RichText {
+    egui::RichText::new(text.to_uppercase())
+        .size(LABEL)
+        .family(egui::FontFamily::Monospace)
+        .color(INK_FAINT)
+}
+
 impl eframe::App for Overlay {
-    /// Transparent so the compositor blends the panel with whatever is behind.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        [
+            IRON.r() as f32 / 255.0,
+            IRON.g() as f32 / 255.0,
+            IRON.b() as f32 / 255.0,
+            GROUND_ALPHA,
+        ]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -166,55 +252,110 @@ impl eframe::App for Overlay {
             if line.kind == Kind::Suggestion {
                 self.waiting_since = None;
             }
+            if line.kind == Kind::Transcript {
+                self.last_signal = Some(Instant::now());
+            }
             if self.lines.len() == MAX_LINES {
                 self.lines.pop_front();
             }
             self.lines.push_back(line);
         }
 
+        // Paint the ground and a border explicitly. Nothing else does: with no
+        // `CentralPanel` there is no background, and an undecorated window with
+        // no edge is impossible to find on a busy desktop.
+        let full = ui.max_rect();
+        ui.painter().rect_filled(full, 3.0, IRON);
+        // Machined, not moulded: 3px on a plate. A lit hairline along the top
+        // edge, because every plate here is lit from above.
+        ui.painter()
+            .rect_stroke(full, 3.0, egui::Stroke::new(1.0, SEAM_LIT), egui::StrokeKind::Inside);
+        ui.painter().line_segment(
+            [full.left_top() + egui::vec2(3.0, 0.5), full.right_top() + egui::vec2(-3.0, 0.5)],
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0xf0, 0xd8, 0x91, 18)),
+        );
+
         {
             // The header doubles as a drag handle: there is no title bar, and
             // a window you cannot move is a window in the way.
             let header = ui.horizontal(|ui| {
+                // The nameplate. Engraved, and there is exactly one.
                 ui.label(
-                    egui::RichText::new("jay")
+                    egui::RichText::new("JAY")
+                        .size(NAMEPLATE)
                         .strong()
-                        .color(egui::Color32::from_rgb(150, 190, 255)),
+                        .color(BRASS_HI),
                 );
-                ui.label(
-                    egui::RichText::new(format!("· {}", self.model_name))
-                        .small()
-                        .weak(),
-                );
+
+                // Intake lamp: lit while speech is arriving, dark when it is
+                // not. Never lit for nothing.
+                let live = self
+                    .last_signal
+                    .is_some_and(|at| at.elapsed() < LIVE_WINDOW);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                let centre = rect.center();
+                if live {
+                    ui.painter()
+                        .circle_filled(centre, 4.5, VERDIGRIS.gamma_multiply(0.28));
+                    ui.painter().circle_filled(centre, 2.5, VERDIGRIS);
+                } else {
+                    ui.painter()
+                        .circle_stroke(centre, 2.5, egui::Stroke::new(1.0, SEAM_LIT));
+                }
+                ui.label(stencil(if live { "intake" } else { "no signal" }));
+
+                ui.label(stencil(&self.model_name));
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+
                     match self.waiting_since {
+                        // Working. Ember, because hot iron is what working
+                        // looks like, and the figure is real.
                         Some(since) => {
-                            ui.add_enabled(
-                                false,
-                                egui::Button::new(format!(
-                                    "thinking… {:.0}s",
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "WORKING {:.0}s",
                                     since.elapsed().as_secs_f32()
-                                )),
+                                ))
+                                .size(HEADING)
+                                .strong()
+                                .color(EMBER),
                             );
                         }
+                        // The lever. One per panel, brass plate, dark text
+                        // struck into the metal.
                         None => {
-                            if ui.button("ask jay").clicked()
+                            let lever = egui::Button::new(
+                                egui::RichText::new("ASK JAY")
+                                    .size(HEADING)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(0x24, 0x1c, 0x05)),
+                            )
+                            .fill(BRASS)
+                            .stroke(egui::Stroke::new(1.0, BRASS_LO))
+                            .corner_radius(2.0);
+                            if ui.add(lever).clicked()
                                 && self.requests.send(Request::Suggest).is_ok()
                             {
                                 self.waiting_since = Some(Instant::now());
                             }
                         }
                     }
+
+                    // Elapsed is a reading, so it is copper.
+                    let elapsed = self.started.elapsed().as_secs();
                     ui.label(
-                        egui::RichText::new(format!("{:.0}s", self.started.elapsed().as_secs_f32()))
-                            .small()
-                            .weak(),
+                        egui::RichText::new(format!("{:02}:{:02}", elapsed / 60, elapsed % 60))
+                            .size(HEADING)
+                            .color(COPPER),
                     );
                 });
             });
+
             if header.response.interact(egui::Sense::drag()).dragged() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
@@ -226,48 +367,72 @@ impl eframe::App for Overlay {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.lines.is_empty() {
-                        ui.label(egui::RichText::new("listening…").weak().italics());
+                        // Absent is absent. Never a zero, never a dash that
+                        // could pass for a reading.
+                        ui.add_space(8.0);
+                        ui.label(stencil("no signal"));
+                        ui.label(
+                            egui::RichText::new("nothing heard yet")
+                                .size(BODY)
+                                .color(INK_FAINT),
+                        );
                     }
                     for line in &self.lines {
                         match line.kind {
                             Kind::Notice => {
-                                ui.label(
-                                    egui::RichText::new(&line.text).small().weak().italics(),
-                                );
+                                ui.label(stencil(&line.text));
+                                ui.add_space(2.0);
                             }
                             Kind::Suggestion => {
-                                // Boxed and labelled, so a suggestion is never
-                                // mistaken for something a person said.
+                                // A reading, in its own labelled compartment.
+                                // Data lives inside a compartment here, the way
+                                // it does on real equipment.
                                 egui::Frame::new()
-                                    .fill(egui::Color32::from_rgba_unmultiplied(30, 38, 52, 200))
-                                    .inner_margin(6.0)
-                                    .corner_radius(4.0)
+                                    .fill(IRON_2)
+                                    .stroke(egui::Stroke::new(1.0, SEAM))
+                                    .inner_margin(10.0)
+                                    .corner_radius(2.0)
                                     .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("READING")
+                                                    .size(HEADING)
+                                                    .strong()
+                                                    .color(BRASS),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(stencil(&format!(
+                                                        "{:.0}s",
+                                                        line.lag.as_secs_f32()
+                                                    )));
+                                                },
+                                            );
+                                        });
+                                        ui.add_space(3.0);
                                         ui.label(
-                                            egui::RichText::new("jay suggests")
-                                                .small()
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(150, 190, 255)),
+                                            egui::RichText::new(&line.text)
+                                                .size(BODY)
+                                                .color(INK),
                                         );
-                                        ui.label(&line.text);
                                     });
-                                ui.add_space(4.0);
+                                ui.add_space(6.0);
                             }
                             Kind::Transcript => {
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.spacing_mut().item_spacing.x = 7.0;
                                     ui.label(
-                                        egui::RichText::new(format!("{}:", line.speaker))
+                                        egui::RichText::new(line.speaker.to_uppercase())
+                                            .size(HEADING)
                                             .strong()
                                             .color(speaker_colour(&line.speaker)),
                                     );
-                                    ui.label(&line.text);
                                     ui.label(
-                                        egui::RichText::new(format!("{:.1}s", line.lag.as_secs_f32()))
-                                            .small()
-                                            .weak(),
+                                        egui::RichText::new(&line.text).size(BODY).color(INK),
                                     );
                                 });
+                                ui.add_space(5.0);
                             }
                         }
                     }
@@ -281,9 +446,15 @@ impl eframe::App for Overlay {
     }
 }
 
+/// Who is speaking, in the two signal metals that are not reserved.
+///
+/// Copper is data — the interviewer, the thing being reacted to. Brass is
+/// structure — you, the fixed point the session is organised around. Neither
+/// is `--brass-hi`, which is scarce and spent on the working state.
 fn speaker_colour(speaker: &str) -> egui::Color32 {
     match speaker {
-        "you" => egui::Color32::from_rgb(140, 200, 160),
-        _ => egui::Color32::from_rgb(220, 180, 130),
+        "you" => BRASS,
+        "jay" => BRASS_HI,
+        _ => COPPER,
     }
 }

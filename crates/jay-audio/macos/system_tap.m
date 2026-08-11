@@ -310,27 +310,75 @@ enum {
     kJayShotWriteFailed = -2,
 };
 
+// Longest edge of a written capture, in pixels.
+//
+// A Retina grab of this display is ~3456 wide and lands at 8.5 MB, and the
+// model's high-resolution tier caps at 2576 on the long edge — so everything
+// above that is upload time spent on pixels that are thrown away before
+// anything reads them. 1800 stays comfortably legible for code while cutting
+// the file by roughly three quarters.
+static const size_t kJayShotMaxEdge = 1800;
+
+// Scale down, preserving aspect. Returns a retained image the caller frees, or
+// the original retained if it is already small enough.
+static CGImageRef JayScaleToFit(CGImageRef image) {
+    size_t w = CGImageGetWidth(image);
+    size_t h = CGImageGetHeight(image);
+    size_t longest = w > h ? w : h;
+    if (longest <= kJayShotMaxEdge) {
+        return CGImageRetain(image);
+    }
+
+    double factor = (double)kJayShotMaxEdge / (double)longest;
+    size_t tw = (size_t)(w * factor);
+    size_t th = (size_t)(h * factor);
+
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef ctx = CGBitmapContextCreate(NULL, tw, th, 8, 0, space,
+                                             kCGImageAlphaPremultipliedFirst
+                                                 | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(space);
+    if (!ctx) {
+        return CGImageRetain(image);
+    }
+
+    // Text is the whole point of these captures, so interpolate properly.
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, tw, th), image);
+    CGImageRef scaled = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+
+    return scaled ? scaled : CGImageRetain(image);
+}
+
 int jay_capture_main_display(const char *path) {
     if (!path) {
         return kJayShotWriteFailed;
     }
 
     @autoreleasepool {
-        CGImageRef image = CGDisplayCreateImage(CGMainDisplayID());
-        if (!image) {
+        CGImageRef full = CGDisplayCreateImage(CGMainDisplayID());
+        if (!full) {
             // Returns NULL rather than erroring when TCC has declined.
             return kJayShotNoImage;
         }
+        CGImageRef image = JayScaleToFit(full);
+        CGImageRelease(full);
 
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        // JPEG, not PNG. PNG is lossless, which matters for pixel work and not
+        // at all for a model reading a stack trace — and it is roughly ten
+        // times the bytes. At 0.85 the text stays crisp and the upload stops
+        // being the slowest part of pressing the button.
         CGImageDestinationRef dest = CGImageDestinationCreateWithURL(
-            (__bridge CFURLRef)url, (__bridge CFStringRef) @"public.png", 1, NULL);
+            (__bridge CFURLRef)url, (__bridge CFStringRef) @"public.jpeg", 1, NULL);
         if (!dest) {
             CGImageRelease(image);
             return kJayShotWriteFailed;
         }
 
-        CGImageDestinationAddImage(dest, image, NULL);
+        NSDictionary *options = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.85};
+        CGImageDestinationAddImage(dest, image, (__bridge CFDictionaryRef)options);
         bool ok = CGImageDestinationFinalize(dest);
         CFRelease(dest);
         CGImageRelease(image);
