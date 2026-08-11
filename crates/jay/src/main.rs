@@ -633,6 +633,20 @@ fn run_pipeline(
     let cooldown = settings.cooldown;
     let auto_gate = assist.is_some();
 
+    // Speaker attribution only works when the two voices arrive on different
+    // channels. In a room, the interviewer's voice comes through the same
+    // microphone as yours, and treating everything as "you" would mean the
+    // gate never fires — the questions would all look like thinking aloud.
+    // With one channel we cannot tell, so we do not pretend to.
+    let attribute_speakers = source.uses_system() && source.uses_mic();
+    if auto_gate && !attribute_speakers {
+        let _ = lines.send(jay_ui::Line::notice(
+            "one audio channel, so I cannot tell who is speaking. Treating \
+             every question as worth answering."
+                .to_string(),
+        ));
+    }
+
     // Hand-asked suggestions. The most valuable trigger there is: nothing is
     // spent that was not asked for, and the screen at the moment of the click
     // is almost always the thing being discussed.
@@ -669,15 +683,17 @@ fn run_pipeline(
                         .cloned()
                         .unwrap_or_else(|| "(nothing has been said yet)".to_string());
 
-                    if tx
-                        .send(Ask {
-                            question,
-                            context,
-                            screenshot,
-                        })
-                        .is_err()
-                    {
-                        return;
+                    // Blocking here would be less catastrophic than in the
+                    // transcriber, but the button should say so rather than
+                    // silently queue behind a suggestion already in flight.
+                    if let Err(crossbeam_channel::TrySendError::Full(_)) = tx.try_send(Ask {
+                        question,
+                        context,
+                        screenshot,
+                    }) {
+                        let _ = lines.send(jay_ui::Line::notice(
+                            "already working on the last one".to_string(),
+                        ));
                     }
                 }
             })
@@ -733,7 +749,7 @@ fn run_pipeline(
 
                 // The first substantial thing the interviewer says is the
                 // problem. Captured once and kept for the whole session.
-                if utterance.channel == Channel::System
+                if (utterance.channel == Channel::System || !attribute_speakers)
                     && result.text.split_whitespace().count() >= PROBLEM_MIN_WORDS
                 {
                     let mut pinned = problem.lock().expect("pinned problem poisoned");
@@ -758,9 +774,13 @@ fn run_pipeline(
                     && let Some(tx) = &question_tx
                     && let Some(trigger) = jay_agent::gate::classify_from(
                         &result.text,
-                        match utterance.channel {
-                            Channel::Mic => jay_agent::gate::Speaker::You,
-                            Channel::System => jay_agent::gate::Speaker::Them,
+                        if attribute_speakers {
+                            match utterance.channel {
+                                Channel::Mic => jay_agent::gate::Speaker::You,
+                                Channel::System => jay_agent::gate::Speaker::Them,
+                            }
+                        } else {
+                            jay_agent::gate::Speaker::Them
                         },
                     )
                 {
@@ -775,11 +795,28 @@ fn run_pipeline(
                     if ready {
                         last_suggestion = Some(Instant::now());
                         let context = with_problem(&problem, &history);
-                        let _ = tx.send(Ask {
-                            question: asked,
-                            context,
-                            screenshot: None,
-                        });
+                        // `try_send`, never `send`. A suggestion takes twenty
+                        // seconds; blocking here to queue one stalls the
+                        // transcriber, which fills the utterance channel,
+                        // which stalls the capture loop, which overflows the
+                        // audio ring. That chain cost 34,048 samples of a real
+                        // recording — about 0.7s of speech — and the symptom
+                        // (dropped samples) appears four layers away from the
+                        // cause. Audio never waits for the expensive path.
+                        if tx
+                            .try_send(Ask {
+                                question: asked,
+                                context,
+                                screenshot: None,
+                            })
+                            .is_err()
+                        {
+                            tracing::debug!("assistant busy; skipped this question");
+                            let _ = lines.send(jay_ui::Line::notice(
+                                "still thinking about the last one, so I let this go by"
+                                    .to_string(),
+                            ));
+                        }
                     } else {
                         tracing::debug!("gate fired but the cooldown has not elapsed");
                     }
@@ -807,6 +844,7 @@ fn run_pipeline(
 
     let started = Instant::now();
     let unlimited = seconds == 0;
+    let mut skipped_utterances = 0u64;
 
     println!("transcribing {source:?} audio with {model}.\n");
 
@@ -818,10 +856,18 @@ fn run_pipeline(
             Channel::Mic => &mut mic_segmenter,
             Channel::System => &mut system_segmenter,
         };
-        if let Some(utterance) = segmenter.push(&frame)
-            && utterance_tx.send(utterance).is_err()
-        {
-            break;
+        if let Some(utterance) = segmenter.push(&frame) {
+            // Same rule one layer up: whisper is slower than speech in the
+            // worst case, and a stalled capture loop loses audio outright,
+            // whereas a skipped utterance loses one sentence and says so.
+            match utterance_tx.try_send(utterance) {
+                Ok(()) => {}
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    skipped_utterances += 1;
+                    tracing::warn!("transcription is behind; dropped an utterance");
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+            }
         }
     }
 
@@ -840,6 +886,11 @@ fn run_pipeline(
         let _ = handle.join();
     }
 
+    if skipped_utterances > 0 {
+        println!(
+            "\n{skipped_utterances} utterance(s) skipped: transcription could not keep up"
+        );
+    }
     if let Some(capture) = &_mic {
         println!("\nmic dropped samples: {}", capture.dropped_samples());
     }

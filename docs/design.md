@@ -120,6 +120,39 @@ anonymous creation next. `jay ask --context <file>` exists so any recorded
 transcript can be replayed through the real prompt path, which is the only
 honest way to tell whether a prompt change helped.
 
+## Audio never waits for the expensive path
+
+One real run reported **34,048 dropped samples** — about 0.7 seconds of speech
+gone. The cause was four layers away from the symptom.
+
+`crossbeam`'s bounded `send` blocks when the channel is full. The question
+channel to the assistant held four, and each suggestion occupies it for twenty
+to thirty seconds. So: assistant busy → the transcriber blocks trying to queue
+a question → the utterance channel (16) fills → the capture loop blocks → the
+frame channel (512) fills → the microphone worker blocks → the ring buffer
+overflows and the device's audio is discarded.
+
+Every hand-off from the audio path to something slower is now `try_send`. A
+suggestion that cannot be queued is skipped with a notice in the panel; an
+utterance that cannot be transcribed in time is counted and reported. Losing a
+sentence is recoverable and visible. Losing the audio is neither.
+
+The general rule, worth keeping: **anything downstream of the microphone may
+drop work, but nothing downstream of the microphone may make the microphone
+wait.**
+
+## Speaker attribution needs two channels, and says so when it has one
+
+The gate treats microphone audio as you and system audio as them, which is free
+and correct when the other person is on a call. In a room, both voices arrive on
+the same microphone, every question looks like you thinking aloud, and the gate
+would never fire — silently.
+
+So attribution is only applied when both channels are actually running. With
+one, jay says in the panel that it cannot tell who is speaking and treats every
+question as worth answering. A wrong guess made quietly is worse than a
+capability declined out loud.
+
 ## No capture exclusion, deliberately
 
 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` on Windows and
