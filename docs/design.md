@@ -57,38 +57,35 @@ tap a named process, and does not drag in the screen-recording permission the
 way `SCStream` does. This machine runs 26.5.1, so it is available. Both routes
 need an FFI shim; the tap route asks the user for less.
 
-## The system tap runs and returns silence (open)
+## Permissions: jay must be launched through LaunchServices
 
-Current state, recorded so it is not rediscovered from scratch.
+The system-audio tap spent a while running perfectly and capturing nothing:
+the IOProc fired steadily, 276 frames in ten seconds with a 4 ms queue lag and
+zero drops, and every sample was zero during audible playback. Screen capture
+failed the same way later, with `screencapture` reporting only "could not
+create image from rect".
 
-The tap starts, reports 48 kHz, and its IOProc fires steadily: 276 frames in
-ten seconds with a 4 ms queue lag and zero drops. Every sample is zero, during
-playback that is plainly audible from the speakers.
+Neither was a CoreAudio or CoreGraphics problem. **A binary launched from a
+shell inherits the responsible process of whatever owns that shell**, so macOS
+never attributed the request to jay: `tccutil reset AudioCapture
+dev.cargopete.jay` succeeded, proving the system tracked a grant for the bundle
+id, while the TCC log showed jay had never once asked for it. An unauthorised
+tap is fed silence rather than an error, which is the worst of both worlds.
 
-Ruled out so far:
+Launched through LaunchServices, the same code works:
 
-- **Not a missing clock.** Adding the default output device as
-  `kAudioAggregateDeviceMainSubDeviceKey` and to the sub-device list changed
-  nothing. The IOProc was firing before that fix and after it.
-- **Not the plain-binary Info.plist.** Wrapping the binary in a signed `.app`
-  with `NSAudioCaptureUsageDescription` (see `scripts/bundle.sh`) also changed
-  nothing.
+```sh
+scripts/bundle.sh debug
+open -a "$PWD/target/debug/jay.app" --args listen --source system --seconds 12 --out /tmp/jay.txt
+```
 
-What the evidence points at: `tccutil reset AudioCapture dev.cargopete.jay`
-succeeds, so macOS does track an `AudioCapture` grant for the bundle. But
-`log show --predicate 'subsystem == "com.apple.TCC"'` shows **no request from
-jay at all**. The process is never asking, so it is never prompted, and an
-unauthorised tap is fed silence rather than an error.
+374 frames of an expected 375, peak RMS 0.265, zero drops. `open -a` needs an
+absolute path to the bundle, and detaches jay from the terminal, which is why
+`listen` grew an `--out` flag.
 
-The likely cause is TCC responsibility attribution: a binary launched from a
-shell inherits the responsible process of whatever owns that shell, so the
-grant would have to belong to the terminal rather than to jay. The next things
-to try are launching via `open -a` so LaunchServices gives the app its own
-identity, and granting audio recording to the terminal directly.
-
-Worth noting for the design: a tap that returns silence looks exactly like a
-quiet room. The `listen` command reports peak RMS and shouts when every frame
-is zero precisely so this class of failure cannot masquerade as success.
+The lesson generalises to every permission jay will ever want: it is not enough
+to be a signed bundle with the right usage descriptions, it has to be *started*
+as one.
 
 ## No capture exclusion, deliberately
 

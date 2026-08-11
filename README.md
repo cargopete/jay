@@ -45,7 +45,8 @@ Early. Stage 1 is capture, transcription and an overlay.
 | Transparent overlay | Wired to the live transcript; visual design unreviewed |
 | Suggestion gate (rules, free) | Working |
 | Suggestions via the Max subscription | Working, measured |
-| System audio capture (CoreAudio process taps) | Runs, returns silence — see design notes |
+| System audio capture (CoreAudio process taps) | Working, via a LaunchServices launch |
+| Screen capture on escalation | Built, permission path shared with audio |
 
 ## Layout
 
@@ -66,6 +67,14 @@ cargo run -p jay -- transcribe           # live transcription from the mic
 cargo run -p jay -- file talk.wav        # transcribe a 16 kHz mono WAV
 cargo run -p jay -- transcribe --overlay # live transcript in a floating panel
 cargo run -p jay -- ask "why is this failing?" --mode dev
+```
+
+Anything touching system audio or the screen must be launched through
+LaunchServices, or macOS silently withholds permission:
+
+```sh
+scripts/bundle.sh debug
+open -a "$PWD/target/debug/jay.app" --args listen --source system --seconds 12 --out /tmp/jay.txt
 ```
 
 `ask` runs the gate first, so it declines to spend anything on an utterance

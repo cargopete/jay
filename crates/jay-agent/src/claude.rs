@@ -53,8 +53,30 @@ impl Claude {
 
     /// Ask for help with `question`, given the recent transcript as context.
     pub fn suggest(&self, mode: Mode, question: &str, transcript: &[String]) -> Result<Suggestion> {
+        self.suggest_with(mode, question, transcript, None)
+    }
+
+    /// As [`suggest`](Self::suggest), optionally with a screenshot.
+    ///
+    /// The image costs an extra turn (the CLI reads the file, then answers)
+    /// and several thousand image tokens, so pass one only when what is on
+    /// screen is the thing being discussed.
+    pub fn suggest_with(
+        &self,
+        mode: Mode,
+        question: &str,
+        transcript: &[String],
+        screenshot: Option<&std::path::Path>,
+    ) -> Result<Suggestion> {
         let started = Instant::now();
-        let prompt = build_prompt(mode, question, transcript);
+        let mut prompt = build_prompt(mode, question, transcript);
+        if let Some(path) = screenshot {
+            prompt.push_str(&format!(
+                "\n\nWhat is on screen right now is at {}. Read it before answering; \
+                 it is probably what the question is about.",
+                path.display()
+            ));
+        }
 
         let mut child = Command::new(&self.binary)
             .arg("--print")
@@ -62,9 +84,10 @@ impl Claude {
             .arg(&self.model)
             .arg("--output-format")
             .arg("json")
-            // No tools. jay is asking for an opinion, not delegating work.
+            // Read only when there is an image to read. Otherwise no tools at
+            // all: jay wants an opinion, not an agent loose in the filesystem.
             .arg("--allowed-tools")
-            .arg("")
+            .arg(if screenshot.is_some() { "Read" } else { "" })
             .arg("--append-system-prompt")
             .arg(mode.system_prompt())
             .stdin(Stdio::piped())

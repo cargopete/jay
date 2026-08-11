@@ -81,6 +81,12 @@ enum Command {
         /// How long to listen for, in seconds.
         #[arg(short, long, default_value_t = 10)]
         seconds: u64,
+        /// Also write the summary here.
+        ///
+        /// Needed when jay is launched via `open -a`, which detaches it from
+        /// the terminal and takes stdout with it.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
     },
     /// Ask jay for help with one question, without the audio pipeline.
     ///
@@ -95,6 +101,13 @@ enum Command {
         /// Model for the reasoning step.
         #[arg(long, default_value = jay_agent::claude::DEFAULT_MODEL)]
         model: String,
+        /// Also send what is on screen right now.
+        ///
+        /// Captures the focused window at the moment of asking, not
+        /// continuously. Needs Screen Recording permission, which means
+        /// launching jay from its .app bundle.
+        #[arg(long)]
+        screen: bool,
     },
     /// Transcribe a 16 kHz mono WAV file.
     ///
@@ -142,7 +155,8 @@ fn main() -> Result<()> {
             source,
             device,
             seconds,
-        } => listen(source, device.as_deref(), seconds),
+            out,
+        } => listen(source, device.as_deref(), seconds, out.as_deref()),
         Command::Transcribe {
             source,
             device,
@@ -155,7 +169,8 @@ fn main() -> Result<()> {
             question,
             mode,
             model,
-        } => ask(&question, mode.into(), &model),
+            screen,
+        } => ask(&question, mode.into(), &model, screen),
     }
 }
 
@@ -396,7 +411,7 @@ fn run_pipeline(
 }
 
 /// One-shot suggestion, no audio involved.
-fn ask(question: &str, mode: jay_agent::Mode, model: &str) -> Result<()> {
+fn ask(question: &str, mode: jay_agent::Mode, model: &str, screen: bool) -> Result<()> {
     // The gate runs first even here, so the thing being demonstrated is the
     // actual decision path and not a shortcut around it.
     let Some(trigger) = jay_agent::gate::classify(question) else {
@@ -411,9 +426,28 @@ fn ask(question: &str, mode: jay_agent::Mode, model: &str) -> Result<()> {
         | jay_agent::gate::Trigger::Event(q) => q.as_str(),
     };
 
+    // Captured here, at the moment of asking, and deleted immediately after.
+    let shot = if screen {
+        let path = jay_agent::screen::capture(
+            jay_agent::screen::Target::FocusedWindow,
+            std::path::Path::new("/tmp"),
+        )
+        .context("capturing the screen")?;
+        println!("captured {} to send with the question", path.display());
+        Some(path)
+    } else {
+        None
+    };
+
     let suggestion = jay_agent::claude::Claude::new(model)
-        .suggest(mode, asked, &[])
-        .context("asking claude")?;
+        .suggest_with(mode, asked, &[], shot.as_deref())
+        .context("asking claude");
+
+    // The screenshot is somebody's work in progress. It does not linger.
+    if let Some(path) = &shot {
+        let _ = std::fs::remove_file(path);
+    }
+    let suggestion = suggestion?;
 
     println!("{}\n", suggestion.text);
     println!(
@@ -438,7 +472,12 @@ fn devices() -> Result<()> {
     Ok(())
 }
 
-fn listen(source: Source, device: Option<&str>, seconds: u64) -> Result<()> {
+fn listen(
+    source: Source,
+    device: Option<&str>,
+    seconds: u64,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
     let (tx, rx) = crossbeam_channel::bounded::<Frame>(512);
 
     let mic_capture = if source.uses_mic() {
@@ -496,11 +535,25 @@ fn listen(source: Source, device: Option<&str>, seconds: u64) -> Result<()> {
 
     // Digital silence looks exactly like a working pipeline pointed at a muted
     // device, so say so rather than let a tidy frame count imply success.
-    if peak_rms < 1e-6 {
+    let silent = peak_rms < 1e-6;
+    if silent {
         println!();
         println!("WARNING: every frame was silent. The device is delivering zeros,");
-        println!("which usually means microphone permission was denied or the wrong");
-        println!("input is selected. Check System Settings > Privacy > Microphone.");
+        println!("which usually means recording permission was denied or the wrong");
+        println!("input is selected. Check System Settings > Privacy & Security.");
+    }
+
+    if let Some(path) = out {
+        let summary = format!(
+            "frames {frames} (expected ~{expected})\npeak_rms {peak_rms:.6}\n\
+             worst_lag {worst_lag:?}\nsystem_rate {}\nsilent {silent}\n",
+            system_capture
+                .as_ref()
+                .map(|c| c.device_sample_rate())
+                .unwrap_or(0),
+        );
+        std::fs::write(path, summary)
+            .with_context(|| format!("writing the summary to {}", path.display()))?;
     }
 
     Ok(())

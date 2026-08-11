@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub mod claude;
 pub mod gate;
+pub mod screen;
 
 /// What jay is being used for. Changes what it is asked, not what it can see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +75,8 @@ pub enum AgentError {
     Cli(String),
     #[error("could not read the response: {0}")]
     Parse(String),
+    #[error("screen capture failed: {0}")]
+    Screen(String),
 }
 
 pub type Result<T> = std::result::Result<T, AgentError>;
