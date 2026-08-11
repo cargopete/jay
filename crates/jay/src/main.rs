@@ -128,6 +128,18 @@ enum Command {
         #[arg(long)]
         screen: bool,
     },
+    /// Check everything jay needs before a session.
+    ///
+    /// Run this once from the .app bundle before you sit down. Permissions on
+    /// macOS fail silently — an ungranted audio tap returns silence rather
+    /// than an error — so the only way to know is to try each one and look.
+    Check {
+        /// Write the results here as well as printing them.
+        ///
+        /// Needed when launched via `open -a`, which takes stdout with it.
+        #[arg(short, long, default_value = "jay-check.txt")]
+        out: std::path::PathBuf,
+    },
     /// Assemble standing context from your memory index.
     ///
     /// Writes a brief you then edit: the generator cannot know which projects
@@ -248,6 +260,7 @@ fn main() -> Result<()> {
         ),
         Command::File { path, model } => transcribe_file(&path, model),
         Command::Brief { out, from, matches } => brief(&out, from.as_deref(), &matches),
+        Command::Check { out } => check(&out),
         Command::Ask {
             question,
             mode,
@@ -688,7 +701,7 @@ fn run_pipeline(
                     let context = with_problem(&problem, &history);
 
                     let screenshot = match jay_agent::screen::capture(
-                        jay_agent::screen::Target::FocusedWindow,
+                        jay_agent::screen::Target::default(),
                         &std::env::temp_dir(),
                     ) {
                         Ok(path) => Some(path),
@@ -916,7 +929,7 @@ fn ask(
     // Captured here, at the moment of asking, and deleted immediately after.
     let shot = if screen {
         let path = jay_agent::screen::capture(
-            jay_agent::screen::Target::FocusedWindow,
+            jay_agent::screen::Target::default(),
             std::path::Path::new("/tmp"),
         )
         .context("capturing the screen")?;
@@ -964,6 +977,80 @@ fn ask(
         suggestion.latency.as_secs_f32(),
         suggestion.cost_usd
     );
+    Ok(())
+}
+
+/// Pre-flight. Tries each capability for real rather than asking macOS.
+fn check(out: &std::path::Path) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut report = String::new();
+
+    let mut note = |line: String| {
+        println!("{line}");
+        let _ = writeln!(report, "{line}");
+    };
+
+    note(format!("jay {} preflight", env!("CARGO_PKG_VERSION")));
+    note(String::new());
+
+    // Microphone. Opening the device is enough: a denied mic yields silence
+    // rather than an error, so this proves availability, not permission.
+    match mic::input_devices() {
+        Ok(names) if !names.is_empty() => note(format!("  mic       OK   {}", names.join(", "))),
+        Ok(_) => note("  mic       FAIL no input devices".to_string()),
+        Err(e) => note(format!("  mic       FAIL {e}")),
+    }
+
+    // System audio. This one really does need the LaunchServices launch, and
+    // failing here before a call is worth ten minutes of confusion during one.
+    let (tx, _rx) = crossbeam_channel::bounded::<Frame>(64);
+    match jay_audio::system::start(tx) {
+        Ok(capture) => note(format!(
+            "  system    OK   tap running at {} Hz",
+            capture.device_sample_rate()
+        )),
+        Err(e) => {
+            note(format!("  system    FAIL {e}"));
+            note("            → launch from the .app bundle: open -a …/jay.app --args check".to_string());
+        }
+    }
+
+    // Screen. A separate permission from audio, and just as silent.
+    match jay_agent::screen::capture(jay_agent::screen::Target::default(), &std::env::temp_dir()) {
+        Ok(path) => {
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let _ = std::fs::remove_file(&path);
+            note(format!("  screen    OK   captured {} KB", bytes / 1024));
+        }
+        Err(e) => {
+            note(format!("  screen    FAIL {e}"));
+            note("            → System Settings › Privacy › Screen & System Audio Recording".to_string());
+        }
+    }
+
+    // Whisper weights: a 466 MB download is not something to discover at the
+    // start of a forty-minute session.
+    match jay_stt::models::ensure(Model::default()) {
+        Ok(path) => note(format!("  whisper   OK   {}", path.display())),
+        Err(e) => note(format!("  whisper   FAIL {e}")),
+    }
+
+    // The subscription. Cheap, and proves the CLI is authenticated.
+    note("  claude    …    asking for one word".to_string());
+    match jay_agent::claude::Claude::new("claude-haiku-4-5")
+        .with_depth(jay_agent::Depth::Hint)
+        .suggest(jay_agent::Mode::Coding, "Reply with the single word: ready", &[])
+    {
+        Ok(s) => note(format!(
+            "  claude    OK   {:.1}s, ${:.4} — cache is now warm",
+            s.latency.as_secs_f32(),
+            s.cost_usd
+        )),
+        Err(e) => note(format!("  claude    FAIL {e}")),
+    }
+
+    std::fs::write(out, &report)
+        .with_context(|| format!("writing {}", out.display()))?;
     Ok(())
 }
 

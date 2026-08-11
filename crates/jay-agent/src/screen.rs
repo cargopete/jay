@@ -20,14 +20,25 @@ use std::process::Command;
 use crate::{AgentError, Result};
 
 /// What to capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Target {
-    /// The frontmost window. The usual choice: it is what the conversation is
-    /// almost always about, and it excludes everything else on the desktop.
-    FocusedWindow,
-    /// The whole main display. Use when the point is the arrangement of
-    /// several windows, e.g. a diagram beside its code.
+    /// The whole main display. The default, for three reasons.
+    ///
+    /// It needs only Screen Recording, where the per-window path also needs
+    /// Accessibility. It cannot pick the wrong window — and it very nearly
+    /// always would, because clicking jay's ask button focuses jay, so the
+    /// "frontmost window" at capture time is the panel rather than the code.
+    /// And in a design discussion the arrangement is often the point: the
+    /// diagram beside the code beside the terminal.
+    #[default]
     Display,
+    /// A single window, by id.
+    ///
+    /// Tighter and cheaper in tokens, and fragile: identifying the window
+    /// means asking System Events, which needs Accessibility permission and
+    /// which some applications simply refuse — `alacritty` returns "can't get
+    /// id of window 1". Use it when you know it works for your setup.
+    FocusedWindow,
 }
 
 /// Capture the screen to a PNG and return its path.
@@ -70,15 +81,40 @@ pub fn capture(target: Target, into: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Window ID of the frontmost window, via AppleScript.
+/// Window ID of the frontmost window that is not jay's own panel.
+///
+/// The panel is why this is not simply "the frontmost window". Pressing the
+/// ask button focuses the panel, so by the time this runs the frontmost window
+/// *is* jay — and the screenshot sent to the model would be a picture of the
+/// transcript rather than of the code being discussed. Silently useless, and
+/// exactly the sort of thing nobody notices until an answer is inexplicably
+/// vague.
 ///
 /// CoreGraphics would avoid the subprocess, but `CGWindowListCopyWindowInfo`
 /// needs the same permission and rather more FFI for a value used once per
 /// suggestion.
 fn frontmost_window_id() -> Result<u32> {
     let script = r#"tell application "System Events"
-        set frontApp to first application process whose frontmost is true
-        return id of first window of frontApp
+        set candidates to every application process whose visible is true
+        repeat with p in candidates
+            if name of p is not "jay" then
+                if (count of windows of p) > 0 then
+                    if frontmost of p is true then
+                        return id of first window of p
+                    end if
+                end if
+            end if
+        end repeat
+        -- Nothing else is frontmost, which means jay has focus. Fall back to
+        -- the most recently active other application with a window.
+        repeat with p in candidates
+            if name of p is not "jay" then
+                if (count of windows of p) > 0 then
+                    return id of first window of p
+                end if
+            end if
+        end repeat
+        error "no window to capture"
     end tell"#;
 
     let output = Command::new("/usr/bin/osascript")
