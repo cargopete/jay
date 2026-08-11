@@ -220,6 +220,15 @@ fn build_prompt(
     }
 
     match mode {
+        Mode::Interview => {
+            prompt.push_str("The interviewer just asked:\n  ");
+            prompt.push_str(question);
+            prompt.push_str(
+                "\n\nWhat is the most valuable thing they have not yet said? \
+                 Say it in plain speech, briefly, so they can fold it into the \
+                 sentence they are already in the middle of.",
+            );
+        }
         Mode::Rehearsal => {
             prompt.push_str("The question just asked was:\n  ");
             prompt.push_str(question);

@@ -23,12 +23,16 @@ pub enum Model {
     /// 75 MB. Fast enough for anything, accurate enough for very little.
     /// Useful for latency experiments.
     Tiny,
-    /// 142 MB. The sensible default: real-time with room to spare on Apple
-    /// silicon, and good enough on clear speech.
-    #[default]
+    /// 142 MB. Fast, and good enough on clear speech in a quiet room.
     Base,
-    /// 466 MB. Noticeably better on accents, jargon and poor microphones.
-    /// Reach for it when `Base` starts mangling the words that matter.
+    /// 466 MB. The default, and worth the download.
+    ///
+    /// Noticeably better on accents, jargon and poor microphones, which is
+    /// exactly the failure that matters here: mishearing "idempotency" or
+    /// "jemalloc" poisons every suggestion downstream, and no amount of
+    /// cleverness in the model recovers a word the transcript never had. The
+    /// extra decode time is irrelevant next to a twelve-second model call.
+    #[default]
     Small,
 }
 

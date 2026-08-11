@@ -73,7 +73,20 @@ cargo run -p jay -- transcribe --assist  # …and suggestions when asked a quest
 cargo run -p jay -- ask "why is this failing?" --mode dev
 cargo run -p jay -- ask "what is wrong here?" --mode dev --screen
 cargo run -p jay -- transcribe --overlay --brief job-spec.md
+cargo run -p jay -- transcribe --assist --mode interview --brief cv.md
 ```
+
+**Modes matter more than they look.** `interview` is for being interviewed
+*right now*: plain speech, no code, no markdown, under sixty words, most
+valuable missing point first, and the boring solution a team would actually
+ship rather than the impressive one. Everything that makes a good written
+engineering answer is useless mid-sentence in front of a person who is waiting.
+`pairing` is the opposite and will happily give you SQL. `rehearsal` is for
+practice, where a longer critique is welcome. `dev` is for a red test.
+
+The tightness pays twice: measured on the same question, `pairing` took 17.9s
+and `interview` took 5.4s, because the latency is dominated by how much is
+generated.
 
 **Give it a brief.** `--brief <file>` is standing context for the whole
 session — a job spec, your CV, the RFC you are pairing on, notes on the

@@ -45,6 +45,8 @@ impl Source {
 /// Which kind of help to ask for.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AskMode {
+    /// You are in a live interview now: short, speakable, no code.
+    Interview,
     /// Mock interview practice: points to think with, and what you missed.
     Rehearsal,
     /// Live pairing: concrete, short, opinionated.
@@ -56,6 +58,7 @@ enum AskMode {
 impl From<AskMode> for jay_agent::Mode {
     fn from(mode: AskMode) -> Self {
         match mode {
+            AskMode::Interview => jay_agent::Mode::Interview,
             AskMode::Rehearsal => jay_agent::Mode::Rehearsal,
             AskMode::Pairing => jay_agent::Mode::Pairing,
             AskMode::Dev => jay_agent::Mode::Dev,
@@ -127,7 +130,7 @@ enum Command {
         /// Path to the WAV file.
         path: std::path::PathBuf,
         /// Whisper model: tiny, base or small.
-        #[arg(short, long, default_value = "base")]
+        #[arg(short, long, default_value = "small")]
         model: Model,
     },
     /// Transcribe speech live, from the microphone and/or system audio.
@@ -139,7 +142,7 @@ enum Command {
         #[arg(short, long)]
         device: Option<String>,
         /// Whisper model: tiny, base or small. Downloaded on first use.
-        #[arg(short, long, default_value = "base")]
+        #[arg(short, long, default_value = "small")]
         model: Model,
         /// How long to run for, in seconds. Zero runs until interrupted.
         #[arg(short, long, default_value_t = 60)]
