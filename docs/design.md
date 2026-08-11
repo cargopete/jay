@@ -141,6 +141,30 @@ The general rule, worth keeping: **anything downstream of the microphone may
 drop work, but nothing downstream of the microphone may make the microphone
 wait.**
 
+## Capture in process, or TCC will refuse you politely
+
+Screen capture first shelled out to `/usr/sbin/screencapture`. It failed from
+the app bundle with "could not create image from display" — with Screen
+Recording granted, the toggle visibly on in System Settings, a stable ad-hoc
+signature, and the identical flags succeeding from a shell one second earlier.
+
+TCC evaluates a request against the process that makes it, and a spawned Apple
+binary does not cleanly inherit its parent's grant. Capturing in the shim, via
+`CGDisplayCreateImage`, makes the request unambiguously jay's and it works
+immediately.
+
+This is the third time the same lesson has cost time on this project. macOS
+grants capabilities to a *process identity*, and every layer of indirection
+between the grant and the request is a chance to lose it: a shell-launched
+binary inherits its terminal's identity (the silent audio tap), and a spawned
+subprocess does not inherit its parent's (this). **Ask directly, from the
+process that holds the grant.**
+
+The failure mode is what makes it expensive: `CGDisplayCreateImage` returns
+`NULL` and `screencapture` reports a generic error. Neither says "permission".
+Hence `jay check`, which tries every capability for real and prints what
+happened.
+
 ## Speaker attribution needs two channels, and says so when it has one
 
 The gate treats microphone audio as you and system audio as them, which is free

@@ -289,3 +289,52 @@ void jay_system_tap_stop(void *handle) {
     free(tap->scratch);
     free(tap);
 }
+
+// ---------------------------------------------------------------------------
+// Screen capture, in process.
+//
+// jay first shelled out to /usr/sbin/screencapture, which works from a
+// terminal and fails from the app with "could not create image from display"
+// even with Screen Recording granted and toggled on. TCC evaluates the request
+// against the process that makes it, and a spawned Apple binary does not
+// cleanly inherit the parent's grant. Capturing here makes the request
+// unambiguously jay's.
+// ---------------------------------------------------------------------------
+
+#import <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
+
+enum {
+    kJayShotOK = 0,
+    kJayShotNoImage = -1,   // almost always Screen Recording permission
+    kJayShotWriteFailed = -2,
+};
+
+int jay_capture_main_display(const char *path) {
+    if (!path) {
+        return kJayShotWriteFailed;
+    }
+
+    @autoreleasepool {
+        CGImageRef image = CGDisplayCreateImage(CGMainDisplayID());
+        if (!image) {
+            // Returns NULL rather than erroring when TCC has declined.
+            return kJayShotNoImage;
+        }
+
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        CGImageDestinationRef dest = CGImageDestinationCreateWithURL(
+            (__bridge CFURLRef)url, (__bridge CFStringRef) @"public.png", 1, NULL);
+        if (!dest) {
+            CGImageRelease(image);
+            return kJayShotWriteFailed;
+        }
+
+        CGImageDestinationAddImage(dest, image, NULL);
+        bool ok = CGImageDestinationFinalize(dest);
+        CFRelease(dest);
+        CGImageRelease(image);
+
+        return ok ? kJayShotOK : kJayShotWriteFailed;
+    }
+}

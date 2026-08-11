@@ -15,6 +15,8 @@ pub mod resample;
 pub mod vad;
 
 #[cfg(target_os = "macos")]
+pub mod screen;
+#[cfg(target_os = "macos")]
 pub mod system;
 
 /// Sample rate every source resamples to before leaving this crate.

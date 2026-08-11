@@ -32,6 +32,10 @@ will now appear in **System Settings › Privacy & Security › Screen & System
 Audio Recording**. Tick it, then run the check again. Left unfixed, every button
 press sends the conversation and silently no screenshot.
 
+(If it still fails with the toggle on, that is not your setup — it means
+something has reintroduced the old subprocess capture. jay captures in process
+precisely because a spawned `screencapture` does not inherit the grant.)
+
 ## Before they arrive
 
 **The interviewer is on a call**, so their voice arrives on system audio and

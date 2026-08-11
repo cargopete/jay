@@ -15,7 +15,6 @@
 //! grant never attaches to jay.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::{AgentError, Result};
 
@@ -46,95 +45,19 @@ pub enum Target {
 /// The caller owns the file and should delete it once the suggestion has been
 /// made; a directory quietly filling with screenshots of someone's work is
 /// exactly the thing this tool should not do.
-pub fn capture(target: Target, into: &Path) -> Result<PathBuf> {
+pub fn capture(_target: Target, into: &Path) -> Result<PathBuf> {
     let path = into.join(format!("jay-capture-{}.png", std::process::id()));
 
-    let mut command = Command::new("/usr/sbin/screencapture");
-    command.arg("-x"); // no shutter sound; this is not a photo op
-    match target {
-        // -o omits the window shadow, which is just wasted pixels and tokens.
-        Target::FocusedWindow => {
-            command.arg("-o").arg("-l").arg(frontmost_window_id()?.to_string());
-        }
-        Target::Display => {
-            command.arg("-m"); // main display only, not every attached screen
-        }
-    }
-    command.arg(&path);
-
-    let output = command
-        .output()
-        .map_err(|e| AgentError::Spawn(format!("running screencapture: {e}")))?;
-
-    if !output.status.success() || !path.is_file() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // The characteristic failure is a permission one, and its message
-        // ("could not create image from rect") does not say so.
-        return Err(AgentError::Screen(format!(
-            "{}. If this mentions creating an image, it is almost certainly \
-             Screen Recording permission: launch jay from its .app bundle via \
-             `open -a`, not directly from a shell",
-            stderr.trim()
-        )));
-    }
+    // In process, via the shim, rather than shelling out to
+    // `/usr/sbin/screencapture`. The subprocess version works from a terminal
+    // and fails from the app bundle even with the permission granted and the
+    // toggle visibly on, because TCC evaluates the request against the process
+    // that makes it and a spawned Apple binary does not cleanly inherit the
+    // parent's grant. Asking directly is unambiguous.
+    jay_audio::screen::capture_main_display(&path)
+        .map_err(|e| AgentError::Screen(e.to_string()))?;
 
     Ok(path)
-}
-
-/// Window ID of the frontmost window that is not jay's own panel.
-///
-/// The panel is why this is not simply "the frontmost window". Pressing the
-/// ask button focuses the panel, so by the time this runs the frontmost window
-/// *is* jay — and the screenshot sent to the model would be a picture of the
-/// transcript rather than of the code being discussed. Silently useless, and
-/// exactly the sort of thing nobody notices until an answer is inexplicably
-/// vague.
-///
-/// CoreGraphics would avoid the subprocess, but `CGWindowListCopyWindowInfo`
-/// needs the same permission and rather more FFI for a value used once per
-/// suggestion.
-fn frontmost_window_id() -> Result<u32> {
-    let script = r#"tell application "System Events"
-        set candidates to every application process whose visible is true
-        repeat with p in candidates
-            if name of p is not "jay" then
-                if (count of windows of p) > 0 then
-                    if frontmost of p is true then
-                        return id of first window of p
-                    end if
-                end if
-            end if
-        end repeat
-        -- Nothing else is frontmost, which means jay has focus. Fall back to
-        -- the most recently active other application with a window.
-        repeat with p in candidates
-            if name of p is not "jay" then
-                if (count of windows of p) > 0 then
-                    return id of first window of p
-                end if
-            end if
-        end repeat
-        error "no window to capture"
-    end tell"#;
-
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|e| AgentError::Spawn(format!("running osascript: {e}")))?;
-
-    if !output.status.success() {
-        return Err(AgentError::Screen(format!(
-            "could not identify the frontmost window: {}. This usually means \
-             Accessibility permission is missing",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .map_err(|_| AgentError::Screen("the frontmost window has no id".into()))
 }
 
 #[cfg(test)]

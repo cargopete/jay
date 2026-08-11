@@ -13,7 +13,7 @@ fn main() {
         .flag("-mmacosx-version-min=14.4")
         .compile("jay_system_tap");
 
-    for framework in ["Foundation", "CoreAudio", "AudioToolbox"] {
+    for framework in ["Foundation", "CoreAudio", "AudioToolbox", "CoreGraphics", "ImageIO"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
 }
