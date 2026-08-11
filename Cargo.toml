@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cargopete/jay"
+
+[workspace.dependencies]
+jay-audio = { path = "crates/jay-audio" }
+jay-stt = { path = "crates/jay-stt" }
+jay-ui = { path = "crates/jay-ui" }
+
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+[profile.dev]
+# duckdb taught us what full debuginfo costs on disk; line tables are enough
+# to read a backtrace and cost a fraction of the space.
+debug = "line-tables-only"

@@ -1,0 +1,14 @@
+[package]
+name = "jay-audio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+audioadapter-buffers = "5.1.0"
+cpal = "0.18.1"
+crossbeam-channel.workspace = true
+ringbuf = "0.5.1"
+rubato = "5.0.0"
+thiserror.workspace = true
+tracing.workspace = true

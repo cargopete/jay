@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Downloaded STT weights. Large, reproducible, and nobody wants them in git.
+/models/
+*.bin
+*.gguf
+*.onnx
+
+# Local config and captured audio, which may contain anything at all.
+/jay.toml
+/recordings/
