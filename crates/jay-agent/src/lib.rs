@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+pub mod brief;
 pub mod claude;
 pub mod gate;
 pub mod screen;
@@ -20,15 +21,29 @@ pub mod screen;
 /// What jay is being used for. Changes what it is asked, not what it can see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// You are in a live interview, right now, already talking.
+    /// A live algorithmic interview: LeetCode-shaped, you are writing code.
     ///
-    /// The tightest mode by a distance. Everything that makes a good written
-    /// engineering answer — code, structure, completeness — is useless here,
-    /// because you cannot read a fenced SQL block aloud to an interviewer who
-    /// is waiting for you to finish a sentence.
-    Interview,
-    /// Mock interview practice: talking points and an outline to think with,
-    /// plus what the answer you actually gave left out.
+    /// The tightest mode there is. You are typing and talking at the same
+    /// time, so anything longer than a phrase is a distraction. What actually
+    /// helps is the name of the approach, the complexity, and the constraint
+    /// that breaks the obvious solution — the sort of thing that turns "I'll
+    /// recurse" into "recursion blows the stack on a large grid, go
+    /// iterative with an explicit stack".
+    Coding,
+    /// A live system design interview.
+    ///
+    /// Slightly more room than [`Coding`](Mode::Coding), because the unit of
+    /// value is a missing component or an unnamed tradeoff rather than a
+    /// one-line insight. Still speech, still no code.
+    SystemDesign,
+    /// Mock interview practice, run the way a real debrief runs: what your
+    /// attempt missed, then the full worked answer.
+    ///
+    /// Real code for an algorithmic problem, a real component diagram for a
+    /// design one. This is the one mode that hands over complete solutions,
+    /// and it is the right one to do it in: a model answer you compare against
+    /// your own attempt is the fastest way to get better, which is why every
+    /// algorithms book prints them — after the exercise.
     Rehearsal,
     /// Live pairing or coaching: concrete, short, opinionated.
     Pairing,
@@ -51,28 +66,50 @@ impl Mode {
     /// trying to be first.
     pub fn system_prompt(self) -> &'static str {
         match self {
-            Mode::Interview => {
-                "The person you are helping is in a live technical interview \
-                 right now and is already speaking. Everything you write must \
-                 be sayable out loud, immediately, with no translation. Plain \
-                 spoken sentences only: no code, no markdown, no headings, no \
-                 bullet lists, no numbered options, no formatting of any kind. \
-                 At most three points, most valuable first, under sixty words \
-                 in total. Prefer one excellent point to three adequate ones. \
-                 If they have already covered it well, reply with the single \
-                 word: covered. Give the boring solution that teams actually \
-                 ship, not the sophisticated one: a unique constraint rather \
-                 than a distributed lock, a cache rather than a custom \
-                 protocol. Interviewers mark people down for reaching past the \
-                 problem, and a candidate who names the simple mechanism and \
-                 says why it is enough sounds more senior than one who reaches \
-                 for the impressive answer."
+            Mode::Coding => {
+                "The person you are helping is in a live algorithmic coding \
+                 interview. They are typing and talking at once, so brevity is \
+                 everything: under forty words, plain speech, no formatting. \
+                 Do not write their solution — they are the one being assessed \
+                 and a pasted implementation helps nobody. Give the shape \
+                 instead: name the approach or data structure, the time and \
+                 space complexity said as you would say it aloud, and the one \
+                 constraint that breaks the naive version (recursion depth on \
+                 large inputs, an overflow, an off-by-one at the boundary, the \
+                 empty case). If they already have the right approach, say the \
+                 edge case they have not mentioned, or reply: covered."
+            }
+            Mode::SystemDesign => {
+                "The person you are helping is in a live system design \
+                 interview and is already speaking. Everything must be sayable \
+                 aloud immediately: plain spoken sentences, no code, no \
+                 markdown, no headings, no bullet lists, no formatting. At \
+                 most three points, most valuable first, under sixty words. \
+                 Prefer one excellent point to three adequate ones. If they \
+                 have covered it well, reply with the single word: covered. \
+                 Give the boring solution teams actually ship, not the \
+                 sophisticated one: a unique constraint rather than a \
+                 distributed lock, a cache rather than a custom protocol. \
+                 Interviewers mark people down for reaching past the problem, \
+                 and a candidate who names the simple mechanism and says why \
+                 it is enough sounds more senior than one who reaches for the \
+                 impressive answer."
             }
             Mode::Rehearsal => {
-                "You are helping someone rehearse for an interview. Give them \
-                 points to think with, never a paragraph to read aloud. An \
-                 answer they assemble themselves survives a follow-up \
-                 question; one they recite does not. Be brief."
+                "You are running the debrief after a mock interview. The \
+                 person has already attempted this and wants to compare \
+                 against a good answer.\n\nStart with what their attempt \
+                 missed or got wrong, specifically, quoting them where it \
+                 helps. Then give the full worked answer.\n\nFor an \
+                 algorithmic problem: the approach in a sentence, then \
+                 complete, idiomatic, compiling code with the invariant that \
+                 makes it correct named in a comment, then time and space \
+                 complexity, then the edge cases a first attempt misses.\n\n\
+                 For a design problem: an ASCII component diagram showing the \
+                 data flow, then each component in a line, then the two or \
+                 three decisions that actually matter and what was traded away \
+                 for each. Say which parts you would cut first under time \
+                 pressure — knowing what is load-bearing is most of the skill."
             }
             Mode::Pairing => {
                 "You are the second engineer in a pairing session. Be concrete, \
@@ -116,6 +153,8 @@ pub enum AgentError {
     Parse(String),
     #[error("screen capture failed: {0}")]
     Screen(String),
+    #[error("assembling the brief: {0}")]
+    Brief(String),
 }
 
 pub type Result<T> = std::result::Result<T, AgentError>;
@@ -135,9 +174,32 @@ mod tests {
         assert_ne!(prompts[1], prompts[2]);
     }
 
+    /// The line the whole design rests on, kept honest by a test.
+    ///
+    /// Practice hands over the complete answer, because comparing your attempt
+    /// against a good one is how you improve. The live modes never do: writing
+    /// someone's solution while an employer assesses them misrepresents them
+    /// to the person making the decision, and that is a different product.
     #[test]
-    fn rehearsal_asks_for_points_rather_than_a_script() {
-        let prompt = Mode::Rehearsal.system_prompt().to_lowercase();
-        assert!(prompt.contains("never a paragraph to read aloud"));
+    fn only_practice_hands_over_a_full_solution() {
+        let rehearsal = Mode::Rehearsal.system_prompt().to_lowercase();
+        assert!(rehearsal.contains("complete, idiomatic, compiling code"));
+        assert!(rehearsal.contains("ascii component diagram"));
+
+        let live = Mode::Coding.system_prompt().to_lowercase();
+        assert!(live.contains("do not write their solution"));
+        assert!(!live.contains("compiling code"));
+
+        // Each live mode forbids handing over the artefact in its own words.
+        assert!(Mode::SystemDesign.system_prompt().to_lowercase().contains("no code"));
+
+        // And both stay short enough to say out loud.
+        for mode in [Mode::Coding, Mode::SystemDesign] {
+            let prompt = mode.system_prompt().to_lowercase();
+            assert!(
+                prompt.contains("under forty words") || prompt.contains("under sixty words"),
+                "{mode:?} should cap its length"
+            );
+        }
     }
 }

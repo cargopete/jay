@@ -220,23 +220,32 @@ fn build_prompt(
     }
 
     match mode {
-        Mode::Interview => {
+        Mode::Coding => {
+            prompt.push_str("The interviewer just asked:\n  ");
+            prompt.push_str(question);
+            prompt.push_str(
+                "\n\nName the approach and its complexity, or the edge case \
+                 they are about to miss. Not the code — the insight that makes \
+                 the code obvious.",
+            );
+        }
+        Mode::SystemDesign => {
             prompt.push_str("The interviewer just asked:\n  ");
             prompt.push_str(question);
             prompt.push_str(
                 "\n\nWhat is the most valuable thing they have not yet said? \
-                 Say it in plain speech, briefly, so they can fold it into the \
+                 A missing component, an unnamed tradeoff, a failure mode. Say \
+                 it in plain speech, briefly, so they can fold it into the \
                  sentence they are already in the middle of.",
             );
         }
         Mode::Rehearsal => {
-            prompt.push_str("The question just asked was:\n  ");
+            prompt.push_str("The problem:\n  ");
             prompt.push_str(question);
             prompt.push_str(
-                "\n\nGive me points to think with, not a script. Three or four \
-                 talking points, then one line on the shape a strong answer \
-                 takes. If the transcript shows I already started answering, \
-                 say what I left out.",
+                "\n\nWork it fully. If the transcript shows an attempt, say \
+                 first where it went wrong or what it missed, then give the \
+                 complete answer.",
             );
         }
         Mode::Pairing => {
@@ -275,7 +284,7 @@ mod tests {
         );
         assert!(prompt.contains("rate limiter"));
         assert!(prompt.contains("systems design"));
-        assert!(prompt.contains("not a script"));
+        assert!(prompt.contains("Work it fully"));
     }
 
     #[test]

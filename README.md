@@ -76,17 +76,26 @@ cargo run -p jay -- transcribe --overlay --brief job-spec.md
 cargo run -p jay -- transcribe --assist --mode interview --brief cv.md
 ```
 
-**Modes matter more than they look.** `interview` is for being interviewed
-*right now*: plain speech, no code, no markdown, under sixty words, most
-valuable missing point first, and the boring solution a team would actually
-ship rather than the impressive one. Everything that makes a good written
-engineering answer is useless mid-sentence in front of a person who is waiting.
-`pairing` is the opposite and will happily give you SQL. `rehearsal` is for
-practice, where a longer critique is welcome. `dev` is for a red test.
+### Modes
 
-The tightness pays twice: measured on the same question, `pairing` took 17.9s
-and `interview` took 5.4s, because the latency is dominated by how much is
-generated.
+| Mode | For | Shape |
+| --- | --- | --- |
+| `coding` | A live LeetCode-shaped round | Under 40 words. Approach, complexity, the edge case. No implementation. |
+| `system-design` | A live design round | Under 60 words, plain speech. The missing component or unnamed tradeoff. |
+| `rehearsal` | Practice, afterwards | The full debrief: what your attempt missed, then real code or a real diagram. |
+| `pairing` | Working with a colleague | Concrete and opinionated. Will happily give you SQL. |
+| `dev` | A test went red | What is likely responsible and what to check first. |
+
+The live modes are terse because you are already talking, and it pays twice:
+measured on the same question, `pairing` took 17.9s and a live mode took 5.4s,
+because latency is dominated by how much gets generated. Constraining the answer
+to something sayable made it fast enough to actually use.
+
+**`rehearsal` is the only mode that hands over a complete solution**, and there
+is a test that keeps it that way. Comparing your attempt against a good answer
+is how you get better — it is what every algorithms book does, after the
+exercise. Writing someone's solution while an employer is assessing them is a
+different product, and jay is not it.
 
 **Give it a brief.** `--brief <file>` is standing context for the whole
 session — a job spec, your CV, the RFC you are pairing on, notes on the

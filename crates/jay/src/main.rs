@@ -45,9 +45,11 @@ impl Source {
 /// Which kind of help to ask for.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AskMode {
-    /// You are in a live interview now: short, speakable, no code.
-    Interview,
-    /// Mock interview practice: points to think with, and what you missed.
+    /// Live algorithmic interview: approach, complexity, edge case. Terse.
+    Coding,
+    /// Live system design interview: the missing component or tradeoff.
+    SystemDesign,
+    /// Mock interview debrief: what you missed, then the full worked answer.
     Rehearsal,
     /// Live pairing: concrete, short, opinionated.
     Pairing,
@@ -58,7 +60,8 @@ enum AskMode {
 impl From<AskMode> for jay_agent::Mode {
     fn from(mode: AskMode) -> Self {
         match mode {
-            AskMode::Interview => jay_agent::Mode::Interview,
+            AskMode::Coding => jay_agent::Mode::Coding,
+            AskMode::SystemDesign => jay_agent::Mode::SystemDesign,
             AskMode::Rehearsal => jay_agent::Mode::Rehearsal,
             AskMode::Pairing => jay_agent::Mode::Pairing,
             AskMode::Dev => jay_agent::Mode::Dev,
@@ -121,6 +124,26 @@ enum Command {
         /// launching jay from its .app bundle.
         #[arg(long)]
         screen: bool,
+    },
+    /// Assemble standing context from your memory index.
+    ///
+    /// Writes a brief you then edit: the generator cannot know which projects
+    /// matter for the conversation you are about to have, and deleting the
+    /// irrelevant ones sharpens every suggestion.
+    Brief {
+        /// Where to write it.
+        #[arg(short, long, default_value = "jay-brief.md")]
+        out: std::path::PathBuf,
+        /// Root of the memory tree. Defaults to the claude-skills checkout.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// Keep only entries mentioning these words. Repeatable.
+        ///
+        /// Strongly recommended. Measured on one interview question, a
+        /// six-line brief beat the full 181-project dump: the dump lost a
+        /// specific point and cost two and a half times as much.
+        #[arg(long = "match")]
+        matches: Vec<String>,
     },
     /// Transcribe a 16 kHz mono WAV file.
     ///
@@ -221,6 +244,7 @@ fn main() -> Result<()> {
             },
         ),
         Command::File { path, model } => transcribe_file(&path, model),
+        Command::Brief { out, from, matches } => brief(&out, from.as_deref(), &matches),
         Command::Ask {
             question,
             mode,
@@ -810,19 +834,12 @@ fn ask(
     context: Option<&std::path::Path>,
     screen: bool,
 ) -> Result<()> {
-    // The gate runs first even here, so the thing being demonstrated is the
-    // actual decision path and not a shortcut around it.
-    let Some(trigger) = jay_agent::gate::classify(question) else {
-        println!("the gate declined to escalate this, so it costs nothing.");
-        println!("it only wakes on questions, wake phrases, or events.");
-        return Ok(());
-    };
-
-    let asked = match &trigger {
-        jay_agent::gate::Trigger::Question(q)
-        | jay_agent::gate::Trigger::Addressed(q)
-        | jay_agent::gate::Trigger::Event(q) => q.as_str(),
-    };
+    // No gate here. The gate exists to filter speech jay merely overheard;
+    // typing `jay ask` is an explicit request, exactly like pressing the
+    // button in the panel. Second-guessing a direct instruction would be
+    // maddening, and it declined "Count the number of islands in a grid"
+    // for the entirely correct reason that it is not a question.
+    let asked = question.trim();
 
     // Captured here, at the moment of asking, and deleted immediately after.
     let shot = if screen {
@@ -871,6 +888,39 @@ fn ask(
         suggestion.latency.as_secs_f32(),
         suggestion.cost_usd
     );
+    Ok(())
+}
+
+/// Assemble a starting brief from the memory index.
+fn brief(
+    out: &std::path::Path,
+    from: Option<&std::path::Path>,
+    matches: &[String],
+) -> Result<()> {
+    let root = match from {
+        Some(path) => path.to_path_buf(),
+        None => jay_agent::brief::default_memory_root().context(
+            "could not find a memory tree. Pass --from <dir>, pointing at a \
+             directory containing MEMORY.md index files",
+        )?,
+    };
+
+    let (markdown, count) = jay_agent::brief::assemble(&root, matches)?;
+    std::fs::write(out, &markdown)
+        .with_context(|| format!("writing {}", out.display()))?;
+
+    println!("{count} projects from {} → {}", root.display(), out.display());
+    let words = markdown.split_whitespace().count();
+    println!("roughly {words} words.");
+    if matches.is_empty() && count > 30 {
+        println!();
+        println!("That is almost certainly too much. On one measured interview");
+        println!("question a six-line brief beat the full dump: the dump lost a");
+        println!("specific point and cost 2.5x as much. Narrow it, e.g.");
+        println!("  jay brief --match indexer --match gateway --match rust");
+    }
+    println!("Then fill in the 'Who you are' section — that part changes the");
+    println!("answers most, and no generator can write it for you.");
     Ok(())
 }
 
