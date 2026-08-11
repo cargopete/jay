@@ -15,9 +15,10 @@ const HOST: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 /// Which whisper weights to run.
 ///
-/// English-only variants throughout: they are smaller and measurably better
-/// than the multilingual ones at the same size, and jay's first job is
-/// technical English.
+/// English-only variants wherever one exists: they are smaller and measurably
+/// better than the multilingual ones at the same size, and jay's first job is
+/// technical English. The exception is `turbo`, which has no English-only
+/// build and does not need one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Model {
     /// 75 MB. Fast enough for anything, accurate enough for very little.
@@ -25,15 +26,31 @@ pub enum Model {
     Tiny,
     /// 142 MB. Fast, and good enough on clear speech in a quiet room.
     Base,
-    /// 466 MB. The default, and worth the download.
+    /// 466 MB. Fast, and good on clear speech.
     ///
     /// Noticeably better on accents, jargon and poor microphones, which is
     /// exactly the failure that matters here: mishearing "idempotency" or
     /// "jemalloc" poisons every suggestion downstream, and no amount of
     /// cleverness in the model recovers a word the transcript never had. The
     /// extra decode time is irrelevant next to a twelve-second model call.
-    #[default]
     Small,
+    /// 1.5 GB. The default.
+    ///
+    /// Measured against the others on one jargon-heavy question: `small` heard
+    /// "Right, so" as "Write, so" and ran the whole thing together as one
+    /// sentence; `turbo` heard "idempotent writes" as "idempotent rights",
+    /// which is worse, being both wrong and plausible. `medium` got both, at
+    /// 12.6x real time — so a 22 second question decodes in under two seconds,
+    /// which is nothing beside a nine second answer.
+    #[default]
+    Medium,
+    /// 1.6 GB. `large-v3-turbo`: large's encoder with a four-layer decoder.
+    ///
+    /// Multilingual, which costs a little on English, and much better on
+    /// unusual vocabulary, which is where jay actually loses. Decodes far
+    /// faster than `medium` despite being larger, because almost all of
+    /// whisper's decode cost is in decoder depth.
+    Turbo,
 }
 
 impl Model {
@@ -42,6 +59,8 @@ impl Model {
             Model::Tiny => "ggml-tiny.en.bin",
             Model::Base => "ggml-base.en.bin",
             Model::Small => "ggml-small.en.bin",
+            Model::Medium => "ggml-medium.en.bin",
+            Model::Turbo => "ggml-large-v3-turbo.bin",
         }
     }
 
@@ -52,6 +71,8 @@ impl Model {
             Model::Tiny => 75,
             Model::Base => 142,
             Model::Small => 466,
+            Model::Medium => 1533,
+            Model::Turbo => 1624,
         }
     }
 }
@@ -62,6 +83,8 @@ impl fmt::Display for Model {
             Model::Tiny => "tiny.en",
             Model::Base => "base.en",
             Model::Small => "small.en",
+            Model::Medium => "medium.en",
+            Model::Turbo => "large-v3-turbo",
         };
         f.write_str(name)
     }
@@ -75,7 +98,11 @@ impl std::str::FromStr for Model {
             "tiny" | "tiny.en" => Ok(Model::Tiny),
             "base" | "base.en" => Ok(Model::Base),
             "small" | "small.en" => Ok(Model::Small),
-            other => Err(format!("unknown model {other:?}, expected tiny, base or small")),
+            "medium" | "medium.en" => Ok(Model::Medium),
+            "turbo" | "large-v3-turbo" | "large" => Ok(Model::Turbo),
+            other => Err(format!(
+                "unknown model {other:?}, expected tiny, base, small, medium or turbo"
+            )),
         }
     }
 }
@@ -160,7 +187,22 @@ mod tests {
         assert_eq!("base".parse::<Model>().unwrap(), Model::Base);
         assert_eq!("small.en".parse::<Model>().unwrap(), Model::Small);
         assert_eq!("  TINY ".parse::<Model>().unwrap(), Model::Tiny);
-        assert!("large".parse::<Model>().is_err());
+        assert_eq!("turbo".parse::<Model>().unwrap(), Model::Turbo);
+        assert_eq!("medium.en".parse::<Model>().unwrap(), Model::Medium);
+        assert!("enormous".parse::<Model>().is_err());
+    }
+
+    /// Every model must name a real file and an honest size. A typo here is a
+    /// 200-response HTML error page saved as weights.
+    #[test]
+    fn every_model_has_a_file_and_a_size() {
+        for model in [Model::Tiny, Model::Base, Model::Small, Model::Medium, Model::Turbo] {
+            assert!(model.file_name().starts_with("ggml-"), "{model}");
+            assert!(model.file_name().ends_with(".bin"), "{model}");
+            assert!(model.approx_mb() > 0, "{model}");
+            // and the name round-trips through the parser
+            assert_eq!(model.to_string().parse::<Model>().unwrap(), model);
+        }
     }
 
     #[test]

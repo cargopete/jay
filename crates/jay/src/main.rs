@@ -168,8 +168,8 @@ enum Command {
     File {
         /// Path to the WAV file.
         path: std::path::PathBuf,
-        /// Whisper model: tiny, base or small.
-        #[arg(short, long, default_value = "small")]
+        /// Whisper model: tiny, base, small, medium or turbo.
+        #[arg(short, long, default_value = "medium")]
         model: Model,
     },
     /// Transcribe speech live, from the microphone and/or system audio.
@@ -180,8 +180,8 @@ enum Command {
         /// Input device name. Defaults to the system default input.
         #[arg(short, long)]
         device: Option<String>,
-        /// Whisper model: tiny, base or small. Downloaded on first use.
-        #[arg(short, long, default_value = "small")]
+        /// Whisper model: tiny, base, small, medium or turbo. Downloaded on first use.
+        #[arg(short, long, default_value = "medium")]
         model: Model,
         /// How long to run for, in seconds. Zero runs until interrupted.
         #[arg(short, long, default_value_t = 60)]

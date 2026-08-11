@@ -62,7 +62,7 @@ You want five OKs:
   mic       OK   46 frames, peak 0.0028 RMS
   system    OK   tap at 48000 Hz, 0 frames, peak 0.0000 RMS
   screen    OK   captured 676 KB
-  whisper   OK   …/ggml-small.en.bin
+  whisper   OK   …/ggml-medium.en.bin
   claude    OK   4.4s, $0.0036 — cache is now warm
 ```
 
@@ -75,7 +75,7 @@ error, so the only way to tell is to look at the samples.
 If `screen` or `system` fails, jay has just asked macOS for that permission, so
 it now appears in **System Settings › Privacy & Security › Screen & System Audio
 Recording**. Tick it and run the check again. The first run also downloads the
-whisper weights (466 MB) and warms the prompt cache, both worth doing before a
+whisper weights (1.5 GB) and warms the prompt cache, both worth doing before a
 session rather than during one.
 
 Then run it:
@@ -149,7 +149,7 @@ jay transcribe --overlay --source both --mode coding \
 | `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
 | `--seconds` | `0` runs until you close the panel. |
-| `--model` | Whisper size: `tiny`, `base`, `small`. Default `small`. |
+| `--model` | `tiny`, `base`, `small`, `medium`, `turbo`. Default `medium`. |
 | `--vocab` | Extra words to expect, comma separated. Primes the transcriber. |
 
 ### `ask`
@@ -210,9 +210,22 @@ speech. Frames are 512 samples because Silero v5 accepts exactly that at 16 kHz
 and rejects anything else — the pipeline is framed to suit the VAD rather than
 the other way round.
 
-**Transcription.** whisper.cpp on Metal, `small.en` by default. Small is worth
-the download: mishearing "idempotency" or "jemalloc" poisons every suggestion
-downstream, and the extra decode time is nothing beside the model call.
+**Transcription.** whisper.cpp on Metal, `medium.en` by default. Measured on
+one jargon-heavy question:
+
+| | inference | speed | got wrong |
+| --- | --- | --- | --- |
+| `small.en` | 783ms | 26.6× | "**Write**, so" for "Right, so"; one run-on sentence |
+| `medium.en` | 1720ms | 12.6× | nothing that changed the meaning |
+| `large-v3-turbo` | 1426ms | 15.1× | "idempotent **rights**" for "writes" |
+
+Turbo is faster than medium and wrong in the more damaging direction, being
+multilingual: a plausible wrong word is worse than an obviously wrong one. At
+12.6× real time a 22 second question decodes in under two seconds, which is
+nothing beside a nine second answer, so medium is the default.
+
+None of them get *pastebin* or *jemalloc*, and a larger model will not fix a
+name. That is what `--vocab` is for.
 
 **Context.** jay keeps 600 lines and chooses what to send when you press. The
 problem statement is **pinned** the moment the interviewer says it, because it

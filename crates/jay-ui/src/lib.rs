@@ -331,17 +331,19 @@ impl Overlay {
                 }
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                for depth in jay_agent::Depth::ALL.into_iter().rev() {
-                    if Self::switch(ui, depth.label(), depth == self.depth)
-                        && self.requests.send(Request::SetDepth(depth)).is_ok()
-                    {
-                        self.depth = depth;
-                    }
+            // Laid out left to right like everything else. A right-to-left
+            // layout put this group in reverse — "NUDGE ANSWER GIVES" — which
+            // is the sort of thing that is obvious the moment somebody looks
+            // at it and invisible to anyone who cannot.
+            ui.add_space(10.0);
+            ui.label(stencil("gives"));
+            for depth in jay_agent::Depth::ALL {
+                if Self::switch(ui, depth.label(), depth == self.depth)
+                    && self.requests.send(Request::SetDepth(depth)).is_ok()
+                {
+                    self.depth = depth;
                 }
-                ui.label(stencil("gives"));
-            });
+            }
         });
     }
 

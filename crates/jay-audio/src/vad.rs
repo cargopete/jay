@@ -26,10 +26,20 @@ const SPEECH_THRESHOLD: f32 = 0.5;
 /// enough to ignore a single chair creak without swallowing a short word.
 const ENTRY_FRAMES: usize = 2;
 
-/// Consecutive silent frames that close an utterance. About 600 ms, which is
-/// long enough to survive the pause in the middle of a sentence and short
-/// enough that the transcript does not lag a whole thought behind.
-const EXIT_FRAMES: usize = 19;
+/// Consecutive silent frames that close an utterance. About one second.
+///
+/// This was 600 ms, chosen to keep the transcript close behind the speaker.
+/// Watching a real person think aloud showed what that costs: "Hello, testing,
+/// um, do you-" / "We think we can..." / "Um... reverse." / "A linked list."
+/// — one thought, four utterances, each transcribed without the context of the
+/// others, and whisper is markedly worse on a two-word fragment than on a
+/// sentence.
+///
+/// A longer window used to mean the transcript lagged at the moment it mattered
+/// most, which was a fair objection. It no longer holds: pressing the lever now
+/// flushes whatever is mid-sentence and waits for it, so the wait is paid only
+/// when somebody is actually reading, and never while they are still talking.
+const EXIT_FRAMES: usize = 31;
 
 /// Frames retained before speech is confirmed, so the onset is not clipped.
 /// About 250 ms, which comfortably covers the plosive at the start of a word.

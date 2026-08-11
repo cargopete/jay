@@ -556,3 +556,49 @@ is one**: the panel draws the answer while it is still being written, so the
 closing fence has not arrived yet. Treating that as "no code block" would show
 the code only once the answer was complete, which is precisely what streaming
 exists to avoid. A test covers it.
+
+## Bigger is not the axis; being wrong plausibly is
+
+Measured on one 22-second jargon-heavy question, spoken by `say` at 16 kHz:
+
+| | inference | speed | errors |
+| --- | --- | --- | --- |
+| `small.en` | 783ms | 26.6× | "Write, so" for "Right, so", "pasta bin", "jemaloc", one run-on sentence |
+| `medium.en` | 1720ms | 12.6× | "pastabin", "jemaloc" |
+| `large-v3-turbo` | 1426ms | 15.1× | "pastabin", "idempotent **rights**", "Jamaloc" |
+
+Turbo is both larger and faster than medium — almost all of whisper's decode
+cost is decoder depth, and turbo has four layers — and it is the worst of the
+three here, because it is multilingual where the others are English-only.
+"idempotent rights" is a more expensive error than "Write, so": it is wrong and
+*plausible*, so nothing downstream has any reason to doubt it.
+
+`medium.en` is therefore the default. At 12.6× real time a 22 second question
+decodes in under two seconds, against a nine second answer.
+
+The more useful finding is what none of them fixed. `jemalloc` is in the
+priming vocabulary and still came back "jemaloc", while `idempotent`,
+`write-ahead log` and `quorum` all landed. Priming raises the odds; it does not
+guarantee. And no model size rescues a product name it has never seen, which is
+what `--vocab` exists for.
+
+## One thought, four utterances
+
+Watching a real person think aloud, the transcript came out as:
+
+```
+you: Hello, testing, um, do you-
+you: We think we can...
+you: Um... reverse.
+you: A linked list.
+```
+
+One thought, four utterances, each transcribed with no knowledge of the others
+— and whisper is markedly worse on a two-word fragment than on a sentence, so
+the fragmentation costs accuracy as well as readability.
+
+The cause is the 600 ms exit window, which was chosen to keep the transcript
+close behind the speaker. That was a fair trade when a press read whatever
+happened to be in the transcript already. It is not one now: pressing the lever
+flushes whatever is mid-sentence and waits for it, so a longer window costs
+nothing at the moment anybody is actually reading. Raised to about a second.
