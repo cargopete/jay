@@ -44,6 +44,7 @@ Early. Stage 1 is capture, transcription and an overlay.
 | Live mic transcription | Wired, not yet tested against a real voice |
 | Transparent overlay | Wired to the live transcript; visual design unreviewed |
 | Suggestion gate (rules, free) | Working |
+| Live pipeline: listen → gate → suggest → panel | Working |
 | Suggestions via the Max subscription | Working, measured |
 | System audio capture (CoreAudio process taps) | Working, via a LaunchServices launch |
 | Screen capture on escalation | Built, permission path shared with audio |
@@ -66,8 +67,16 @@ cargo run -p jay -- listen --seconds 6   # capture smoke test with levels
 cargo run -p jay -- transcribe           # live transcription from the mic
 cargo run -p jay -- file talk.wav        # transcribe a 16 kHz mono WAV
 cargo run -p jay -- transcribe --overlay # live transcript in a floating panel
+cargo run -p jay -- transcribe --assist  # …and suggestions when asked a question
 cargo run -p jay -- ask "why is this failing?" --mode dev
+cargo run -p jay -- ask "what is wrong here?" --mode dev --screen
 ```
+
+`--assist` is off by default, because listening is free and suggesting is not.
+When it is on, two guards apply: a `--cooldown` (30s) so three questions in
+quick succession are not three simultaneous escalations, and a `--budget`
+($2.00) that stops jay suggesting once the session has spent it. Both are
+reported in the panel as they are used.
 
 Anything touching system audio or the screen must be launched through
 LaunchServices, or macOS silently withholds permission:

@@ -15,14 +15,46 @@ use eframe::egui;
 /// the UI; the transcript itself is not the UI's job to store.
 const MAX_LINES: usize = 200;
 
-/// One finished utterance, ready to show.
+/// What sort of line this is, which decides how it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Something somebody said.
+    Transcript,
+    /// Something jay is offering. Drawn distinctly, because you should never
+    /// have to wonder whether you are reading a person or a machine.
+    Suggestion,
+    /// Housekeeping: budget spent, a gate declining, an error.
+    Notice,
+}
+
+/// One line in the panel.
 #[derive(Debug, Clone)]
 pub struct Line {
-    /// Who said it: "you" or "them".
+    /// Who said it: "you", "them", or "jay".
     pub speaker: String,
     pub text: String,
     /// How far behind live this line landed, for the status row.
     pub lag: std::time::Duration,
+    pub kind: Kind,
+}
+
+impl Line {
+    pub fn transcript(speaker: impl Into<String>, text: impl Into<String>, lag: std::time::Duration) -> Self {
+        Self { speaker: speaker.into(), text: text.into(), lag, kind: Kind::Transcript }
+    }
+
+    pub fn suggestion(text: impl Into<String>, lag: std::time::Duration) -> Self {
+        Self { speaker: "jay".into(), text: text.into(), lag, kind: Kind::Suggestion }
+    }
+
+    pub fn notice(text: impl Into<String>) -> Self {
+        Self {
+            speaker: "jay".into(),
+            text: text.into(),
+            lag: std::time::Duration::ZERO,
+            kind: Kind::Notice,
+        }
+    }
 }
 
 /// Run the overlay. Blocks until the window is closed.
@@ -123,20 +155,47 @@ impl eframe::App for Overlay {
                         ui.label(egui::RichText::new("listening…").weak().italics());
                     }
                     for line in &self.lines {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(
-                                egui::RichText::new(format!("{}:", line.speaker))
-                                    .strong()
-                                    .color(speaker_colour(&line.speaker)),
-                            );
-                            ui.label(&line.text);
-                            ui.label(
-                                egui::RichText::new(format!("{:.1}s", line.lag.as_secs_f32()))
-                                    .small()
-                                    .weak(),
-                            );
-                        });
+                        match line.kind {
+                            Kind::Notice => {
+                                ui.label(
+                                    egui::RichText::new(&line.text).small().weak().italics(),
+                                );
+                            }
+                            Kind::Suggestion => {
+                                // Boxed and labelled, so a suggestion is never
+                                // mistaken for something a person said.
+                                egui::Frame::new()
+                                    .fill(egui::Color32::from_rgba_unmultiplied(30, 38, 52, 200))
+                                    .inner_margin(6.0)
+                                    .corner_radius(4.0)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new("jay suggests")
+                                                .small()
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(150, 190, 255)),
+                                        );
+                                        ui.label(&line.text);
+                                    });
+                                ui.add_space(4.0);
+                            }
+                            Kind::Transcript => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label(
+                                        egui::RichText::new(format!("{}:", line.speaker))
+                                            .strong()
+                                            .color(speaker_colour(&line.speaker)),
+                                    );
+                                    ui.label(&line.text);
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.1}s", line.lag.as_secs_f32()))
+                                            .small()
+                                            .weak(),
+                                    );
+                                });
+                            }
+                        }
                     }
                 });
         }
