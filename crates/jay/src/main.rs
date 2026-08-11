@@ -298,6 +298,7 @@ fn transcribe(
     // overlay are just two consumers of the same stream rather than two paths
     // through the pipeline.
     let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
+    let (request_tx, request_rx) = crossbeam_channel::bounded::<jay_ui::Request>(2);
 
     if !overlay {
         let printer = std::thread::Builder::new()
@@ -324,7 +325,8 @@ fn transcribe(
             })
             .context("spawning the printer")?;
 
-        let result = run_pipeline(source, device.as_deref(), model, seconds, line_tx, assist);
+        // No panel means no button, so no request channel.
+        let result = run_pipeline(source, device.as_deref(), model, seconds, line_tx, assist, None);
         let _ = printer.join();
         return result;
     }
@@ -334,16 +336,35 @@ fn transcribe(
     std::thread::Builder::new()
         .name("jay-pipeline".into())
         .spawn(move || {
-            if let Err(e) =
-                run_pipeline(source, device.as_deref(), model, seconds, line_tx, assist)
-            {
+            if let Err(e) = run_pipeline(
+                source,
+                device.as_deref(),
+                model,
+                seconds,
+                line_tx,
+                assist,
+                Some(request_rx),
+            ) {
                 tracing::error!(%e, "capture pipeline stopped");
             }
         })
         .context("spawning the capture pipeline")?;
 
-    jay_ui::run(line_rx, model.to_string()).map_err(|e| anyhow::anyhow!("overlay: {e}"))
+    jay_ui::run(line_rx, request_tx, model.to_string())
+        .map_err(|e| anyhow::anyhow!("overlay: {e}"))
 }
+
+/// Lines of conversation sent with each suggestion.
+const CONTEXT_LINES: usize = 12;
+
+/// Recent transcript, shared between the transcriber and the "ask" button.
+type SharedHistory = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// Utterances quieter than this are treated as whisper inventing things.
+///
+/// Real speech at conversational distance sits well above this; the room tone
+/// that fools the VAD sits well below.
+const HALLUCINATION_FLOOR: f32 = 0.01;
 
 /// Settings for the half of jay that costs money.
 #[derive(Debug, Clone, Copy)]
@@ -358,11 +379,24 @@ struct Assist {
     cooldown: Duration,
 }
 
+/// A question plus the conversation around it.
+///
+/// Sending the surrounding lines is the single biggest lever on suggestion
+/// quality. Given only the triggering sentence, the model has nothing to
+/// ground itself in and improvises.
+struct Ask {
+    question: String,
+    context: Vec<String>,
+    /// Present only for hand-asked requests, where the screen at the moment of
+    /// the click is very likely the thing being discussed.
+    screenshot: Option<std::path::PathBuf>,
+}
+
 /// Runs suggestions on their own thread, and refuses to overspend.
 fn spawn_assistant(
     assist: Assist,
     model: &str,
-    questions: crossbeam_channel::Receiver<String>,
+    questions: crossbeam_channel::Receiver<Ask>,
     lines: crossbeam_channel::Sender<jay_ui::Line>,
 ) -> Result<std::thread::JoinHandle<()>> {
     let claude = jay_agent::claude::Claude::new(model);
@@ -370,7 +404,12 @@ fn spawn_assistant(
         .name("jay-assist".into())
         .spawn(move || {
             let mut spent = 0.0f64;
-            for question in questions {
+            for Ask {
+                question,
+                context,
+                screenshot,
+            } in questions
+            {
                 if spent >= assist.budget_usd {
                     // Said once, then the loop keeps draining so the sender
                     // never blocks on a full channel.
@@ -378,7 +417,13 @@ fn spawn_assistant(
                 }
 
                 let started = Instant::now();
-                match claude.suggest(assist.mode, &question, &[]) {
+                let outcome =
+                    claude.suggest_with(assist.mode, &question, &context, screenshot.as_deref());
+                // Somebody's work in progress. It does not linger.
+                if let Some(path) = &screenshot {
+                    let _ = std::fs::remove_file(path);
+                }
+                match outcome {
                     Ok(suggestion) => {
                         spent += suggestion.cost_usd;
                         let _ = lines.send(jay_ui::Line::suggestion(
@@ -417,6 +462,7 @@ fn run_pipeline(
     seconds: u64,
     lines: crossbeam_channel::Sender<jay_ui::Line>,
     assist: Option<Assist>,
+    requests: Option<crossbeam_channel::Receiver<jay_ui::Request>>,
 ) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
 
@@ -442,10 +488,27 @@ fn run_pipeline(
     };
     drop(frame_tx);
 
-    // The assistant, if this session is paying for one.
-    let (question_tx, assistant) = match assist {
+    // Rolling context handed to every suggestion. Long enough to carry a
+    // thread of conversation, short enough not to bloat the prompt. Shared,
+    // because the "ask jay" button reads what the transcriber writes.
+    let history: SharedHistory = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::VecDeque::with_capacity(CONTEXT_LINES),
+    ));
+
+    // The assistant runs whenever anything can ask it: the automatic gate
+    // (`--assist`) or the panel's button. The button is the primary trigger, so
+    // it must work even when the automatic gate is off — an explicit press is
+    // exactly the case `--assist`'s caution exists to protect against.
+    let settings = assist.unwrap_or(Assist {
+        mode: jay_agent::Mode::Pairing,
+        budget_usd: 2.0,
+        cooldown: Duration::from_secs(30),
+    });
+    let wanted = assist.is_some() || requests.is_some();
+
+    let (question_tx, assistant) = match wanted.then_some(settings) {
         Some(settings) => {
-            let (tx, rx) = crossbeam_channel::bounded::<String>(4);
+            let (tx, rx) = crossbeam_channel::bounded::<Ask>(4);
             let handle = spawn_assistant(
                 settings,
                 jay_agent::claude::DEFAULT_MODEL,
@@ -453,18 +516,82 @@ fn run_pipeline(
                 lines.clone(),
             )?;
             let _ = lines.send(jay_ui::Line::notice(format!(
-                "assisting in {:?} mode, up to ${:.2} this session",
-                settings.mode, settings.budget_usd
+                "{} in {:?} mode, up to ${:.2} this session",
+                if assist.is_some() {
+                    "assisting automatically"
+                } else {
+                    "ready when you press ask jay"
+                },
+                settings.mode,
+                settings.budget_usd
             )));
             (Some(tx), Some(handle))
         }
         None => (None, None),
     };
-    let cooldown = assist.map(|a| a.cooldown).unwrap_or_default();
+    let cooldown = settings.cooldown;
+    let auto_gate = assist.is_some();
+
+    // Hand-asked suggestions. The most valuable trigger there is: nothing is
+    // spent that was not asked for, and the screen at the moment of the click
+    // is almost always the thing being discussed.
+    if let (Some(tx), Some(rx)) = (question_tx.clone(), requests) {
+        let history = std::sync::Arc::clone(&history);
+        let lines = lines.clone();
+        std::thread::Builder::new()
+            .name("jay-hand-ask".into())
+            .spawn(move || {
+                for jay_ui::Request::Suggest in rx {
+                    let context: Vec<String> = history
+                        .lock()
+                        .expect("transcript history poisoned")
+                        .iter()
+                        .cloned()
+                        .collect();
+
+                    let screenshot = match jay_agent::screen::capture(
+                        jay_agent::screen::Target::FocusedWindow,
+                        &std::env::temp_dir(),
+                    ) {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            // Not fatal: a suggestion from the conversation
+                            // alone is worth more than no suggestion.
+                            tracing::warn!(%e, "asking without a screenshot");
+                            let _ = lines.send(jay_ui::Line::notice(
+                                "could not capture the screen; asking from the \
+                                 conversation alone"
+                                    .to_string(),
+                            ));
+                            None
+                        }
+                    };
+
+                    let question = context
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "(nothing has been said yet)".to_string());
+
+                    if tx
+                        .send(Ask {
+                            question,
+                            context,
+                            screenshot,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .context("spawning the hand-ask handler")?;
+    }
 
     let worker = std::thread::Builder::new()
         .name("jay-stt".into())
-        .spawn(move || {
+        .spawn({
+            let history = std::sync::Arc::clone(&history);
+            move || {
             let mut last_suggestion: Option<Instant> = None;
             for utterance in utterance_rx {
                 let spoken = utterance.duration();
@@ -488,12 +615,37 @@ fn run_pipeline(
                 tracing::debug!(
                     spoken = spoken.as_secs_f32(),
                     inference_ms = result.inference.as_secs_f32() * 1000.0,
+                    rms = utterance.rms(),
                     "transcribed"
                 );
 
+                // Whisper invents fluent sentences out of near-silence, and in
+                // testing one of them ("That's a good cup of tea, eh?") ended
+                // in a question mark and triggered a paid escalation. A stock
+                // phrase list cannot catch novel inventions; the level of the
+                // audio can. Quiet in, distrusted out.
+                if utterance.rms() < HALLUCINATION_FLOOR {
+                    tracing::debug!(
+                        rms = utterance.rms(),
+                        text = %result.text,
+                        "dropped a transcript from near-silent audio"
+                    );
+                    continue;
+                }
+
+                {
+                    let line = format!("{}: {}", utterance.channel.label(), result.text);
+                    let mut history = history.lock().expect("transcript history poisoned");
+                    if history.len() == CONTEXT_LINES {
+                        history.pop_front();
+                    }
+                    history.push_back(line);
+                }
+
                 // The gate runs before the line is even displayed, so a
                 // question starts its (slow) escalation as early as possible.
-                if let Some(tx) = &question_tx
+                if auto_gate
+                    && let Some(tx) = &question_tx
                     && let Some(trigger) = jay_agent::gate::classify(&result.text)
                 {
                     let asked = match trigger {
@@ -506,7 +658,17 @@ fn run_pipeline(
                         .unwrap_or(true);
                     if ready {
                         last_suggestion = Some(Instant::now());
-                        let _ = tx.send(asked);
+                        let context = history
+                            .lock()
+                            .expect("transcript history poisoned")
+                            .iter()
+                            .cloned()
+                            .collect();
+                        let _ = tx.send(Ask {
+                            question: asked,
+                            context,
+                            screenshot: None,
+                        });
                     } else {
                         tracing::debug!("gate fired but the cooldown has not elapsed");
                     }
@@ -521,6 +683,7 @@ fn run_pipeline(
                     .is_err()
                 {
                     return; // nobody is listening any more
+                }
                 }
             }
         })

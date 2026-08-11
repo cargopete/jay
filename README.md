@@ -44,7 +44,8 @@ Early. Stage 1 is capture, transcription and an overlay.
 | Live mic transcription | Wired, not yet tested against a real voice |
 | Transparent overlay | Wired to the live transcript; visual design unreviewed |
 | Suggestion gate (rules, free) | Working |
-| Live pipeline: listen → gate → suggest → panel | Working |
+| Live pipeline: listen → gate → suggest → panel | Working, tested end to end |
+| Hand-asked suggestions (button + screenshot) | Built, button untested by a human |
 | Suggestions via the Max subscription | Working, measured |
 | System audio capture (CoreAudio process taps) | Working, via a LaunchServices launch |
 | Screen capture on escalation | Built, permission path shared with audio |
@@ -72,11 +73,19 @@ cargo run -p jay -- ask "why is this failing?" --mode dev
 cargo run -p jay -- ask "what is wrong here?" --mode dev --screen
 ```
 
-`--assist` is off by default, because listening is free and suggesting is not.
-When it is on, two guards apply: a `--cooldown` (30s) so three questions in
+The panel has an **ask jay** button, and that is the primary way to get a
+suggestion. Pressing it sends the recent conversation *and a screenshot of the
+focused window*, taken at that moment, which is almost always the thing being
+discussed. Nothing is spent that you did not ask for, and the twelve-second
+wait is a great deal easier to live with when you chose it.
+
+`--assist` is the *automatic* gate on top of that: jay escalates by itself when
+it hears a question. Off by default, because listening is free and suggesting is
+not. Two guards apply either way: a `--cooldown` (30s) so three questions in
 quick succession are not three simultaneous escalations, and a `--budget`
-($2.00) that stops jay suggesting once the session has spent it. Both are
-reported in the panel as they are used.
+($2.00) beyond which jay keeps listening but stops suggesting. The budget is a
+soft ceiling — it is checked before a call, not during one, so a session can
+overshoot by the cost of the call in flight.
 
 Anything touching system audio or the screen must be launched through
 LaunchServices, or macOS silently withholds permission:

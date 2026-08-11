@@ -78,7 +78,16 @@ impl Claude {
             ));
         }
 
+        // Run from a neutral directory. `claude -p` inherits the working
+        // directory, and with thin context it will happily improvise an answer
+        // out of whatever repository it happens to be standing in — observed
+        // in testing, where a stray question produced a summary of jay's own
+        // uncommitted changes. Worse than useless: point jay at a client's
+        // codebase and that becomes a leak.
+        let neutral = std::env::temp_dir();
+
         let mut child = Command::new(&self.binary)
+            .current_dir(&neutral)
             .arg("--print")
             .arg("--model")
             .arg(&self.model)

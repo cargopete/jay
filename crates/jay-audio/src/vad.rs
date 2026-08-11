@@ -50,6 +50,19 @@ pub struct Utterance {
 }
 
 impl Utterance {
+    /// Root-mean-square amplitude over the whole utterance.
+    ///
+    /// The cheapest defence against whisper's habit of inventing fluent
+    /// sentences out of near-silence: a caller can distrust a transcript whose
+    /// audio was never loud enough to be speech.
+    pub fn rms(&self) -> f32 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let sum: f32 = self.samples.iter().map(|s| s * s).sum();
+        (sum / self.samples.len() as f32).sqrt()
+    }
+
     pub fn duration(&self) -> Duration {
         Duration::from_secs_f64(self.samples.len() as f64 / f64::from(SAMPLE_RATE))
     }

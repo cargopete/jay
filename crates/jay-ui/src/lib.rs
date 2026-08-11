@@ -57,8 +57,23 @@ impl Line {
     }
 }
 
+/// Something the panel asks the pipeline to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// The user wants a suggestion now, about whatever is going on.
+    ///
+    /// The most valuable trigger there is: no false positives, nothing spent
+    /// that was not asked for, and the moment of the click is exactly the
+    /// moment the screen shows the thing being discussed.
+    Suggest,
+}
+
 /// Run the overlay. Blocks until the window is closed.
-pub fn run(rx: Receiver<Line>, model_name: String) -> eframe::Result<()> {
+pub fn run(
+    rx: Receiver<Line>,
+    requests: crossbeam_channel::Sender<Request>,
+    model_name: String,
+) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("jay")
@@ -73,19 +88,29 @@ pub fn run(rx: Receiver<Line>, model_name: String) -> eframe::Result<()> {
     eframe::run_native(
         "jay",
         options,
-        Box::new(move |cc| Ok(Box::new(Overlay::new(cc, rx, model_name)))),
+        Box::new(move |cc| Ok(Box::new(Overlay::new(cc, rx, requests, model_name)))),
     )
 }
 
 struct Overlay {
     rx: Receiver<Line>,
+    requests: crossbeam_channel::Sender<Request>,
     lines: VecDeque<Line>,
     model_name: String,
     started: Instant,
+    /// Set when a suggestion is in flight, so the button can say so. A
+    /// suggestion takes twelve seconds at best; a button that looks idle for
+    /// twelve seconds gets pressed again.
+    waiting_since: Option<Instant>,
 }
 
 impl Overlay {
-    fn new(cc: &eframe::CreationContext<'_>, rx: Receiver<Line>, model_name: String) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        rx: Receiver<Line>,
+        requests: crossbeam_channel::Sender<Request>,
+        model_name: String,
+    ) -> Self {
         // Dark, translucent, and low contrast enough to sit over a terminal
         // without becoming the thing you look at.
         let mut visuals = egui::Visuals::dark();
@@ -95,9 +120,11 @@ impl Overlay {
 
         Self {
             rx,
+            requests,
             lines: VecDeque::with_capacity(MAX_LINES),
             model_name,
             started: Instant::now(),
+            waiting_since: None,
         }
     }
 }
@@ -110,6 +137,10 @@ impl eframe::App for Overlay {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         for line in self.rx.try_iter() {
+            // A suggestion arriving is what clears the waiting state.
+            if line.kind == Kind::Suggestion {
+                self.waiting_since = None;
+            }
             if self.lines.len() == MAX_LINES {
                 self.lines.pop_front();
             }
@@ -133,6 +164,24 @@ impl eframe::App for Overlay {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    match self.waiting_since {
+                        Some(since) => {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(format!(
+                                    "thinking… {:.0}s",
+                                    since.elapsed().as_secs_f32()
+                                )),
+                            );
+                        }
+                        None => {
+                            if ui.button("ask jay").clicked()
+                                && self.requests.send(Request::Suggest).is_ok()
+                            {
+                                self.waiting_since = Some(Instant::now());
+                            }
+                        }
                     }
                     ui.label(
                         egui::RichText::new(format!("{:.0}s", self.started.elapsed().as_secs_f32()))
