@@ -39,9 +39,10 @@ Early. Stage 1 is capture, transcription and an overlay.
 | Piece | State |
 | --- | --- |
 | Microphone capture (cpal, 16 kHz mono) | Working, smoke-tested on an M3 Pro |
+| Silero VAD segmentation | Working, weights compiled in |
+| Local STT (whisper.cpp via Metal) | Working, `base.en` at ~40x real time |
+| Live mic transcription | Wired, not yet tested against a real voice |
 | System audio capture (CoreAudio process taps) | Not started |
-| Silero VAD gating | Not started |
-| Local STT (whisper.cpp via Metal) | Not started |
 | Transparent overlay | Not started |
 | Agent loop and suggestions | Not started |
 
@@ -58,9 +59,14 @@ crates/
 ## Trying it
 
 ```sh
-cargo run -p jay -- devices             # what inputs can jay see
-cargo run -p jay -- listen --seconds 6  # capture smoke test with levels
+cargo run -p jay -- devices              # what inputs can jay see
+cargo run -p jay -- listen --seconds 6   # capture smoke test with levels
+cargo run -p jay -- transcribe           # live transcription from the mic
+cargo run -p jay -- file talk.wav        # transcribe a 16 kHz mono WAV
 ```
+
+The first run of either transcribe command downloads whisper weights
+(`base.en`, 142 MB) into the platform cache directory.
 
 `listen` reports frames delivered, peak RMS, queue lag and dropped samples. A
 peak RMS of zero with a healthy frame count means the device is handing over

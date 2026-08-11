@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use jay_audio::vad::{SpeechSegmenter, Utterance};
 use jay_audio::{Channel, Frame, SAMPLE_RATE, mic};
+use jay_stt::models::Model;
+use jay_stt::whisper::Whisper;
+use jay_stt::SpeechModel;
 
 #[derive(Parser)]
 #[command(name = "jay", version, about = "A consented, local-first listening assistant")]
@@ -33,6 +37,29 @@ enum Command {
         #[arg(short, long, default_value_t = 10)]
         seconds: u64,
     },
+    /// Transcribe a 16 kHz mono WAV file.
+    ///
+    /// Useful for working through a recording after the fact, and for checking
+    /// the model end to end without having to talk to your laptop.
+    File {
+        /// Path to the WAV file.
+        path: std::path::PathBuf,
+        /// Whisper model: tiny, base or small.
+        #[arg(short, long, default_value = "base")]
+        model: Model,
+    },
+    /// Transcribe speech from the microphone, live.
+    Transcribe {
+        /// Input device name. Defaults to the system default input.
+        #[arg(short, long)]
+        device: Option<String>,
+        /// Whisper model: tiny, base or small. Downloaded on first use.
+        #[arg(short, long, default_value = "base")]
+        model: Model,
+        /// How long to run for, in seconds. Zero runs until interrupted.
+        #[arg(short, long, default_value_t = 60)]
+        seconds: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -47,7 +74,164 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Devices => devices(),
         Command::Listen { device, seconds } => listen(device.as_deref(), seconds),
+        Command::Transcribe {
+            device,
+            model,
+            seconds,
+        } => transcribe(device.as_deref(), model, seconds),
+        Command::File { path, model } => transcribe_file(&path, model),
     }
+}
+
+/// Transcribe a WAV file, segmenting it exactly as the live path would.
+///
+/// Running the same VAD and the same model over a file means a bad live result
+/// can be reproduced offline, which is the difference between debugging this
+/// and guessing at it.
+fn transcribe_file(path: &std::path::Path, model: Model) -> Result<()> {
+    let mut reader = hound::WavReader::open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let spec = reader.spec();
+
+    if spec.sample_rate != SAMPLE_RATE || spec.channels != 1 {
+        anyhow::bail!(
+            "expected 16 kHz mono, got {} Hz with {} channel(s). Convert it first, e.g.\n  \
+             afconvert -f WAVE -d LEI16@16000 -c 1 in.wav out.wav",
+            spec.sample_rate,
+            spec.channels
+        );
+    }
+
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader.samples::<f32>().filter_map(|s| s.ok()).collect(),
+        hound::SampleFormat::Int => reader
+            .samples::<i16>()
+            .filter_map(|s| s.ok())
+            .map(|s| f32::from(s) / 32768.0)
+            .collect(),
+    };
+
+    let audio_seconds = samples.len() as f32 / SAMPLE_RATE as f32;
+    println!("{}: {audio_seconds:.1}s of audio", path.display());
+
+    let mut whisper = Whisper::load(model).context("loading whisper model")?;
+    let mut segmenter = SpeechSegmenter::new(Channel::Mic)?;
+    let started = Instant::now();
+
+    let mut utterances = Vec::new();
+    for chunk in samples.chunks(jay_audio::FRAME_SAMPLES) {
+        if chunk.len() < jay_audio::FRAME_SAMPLES {
+            break; // the VAD needs whole frames
+        }
+        let frame = Frame {
+            channel: Channel::Mic,
+            samples: chunk.to_vec(),
+            captured_at: Instant::now(),
+        };
+        if let Some(utterance) = segmenter.push(&frame) {
+            utterances.push(utterance);
+        }
+    }
+    if let Some(tail) = segmenter.flush() {
+        utterances.push(tail);
+    }
+
+    if utterances.is_empty() {
+        println!("the VAD found no speech in this file");
+        return Ok(());
+    }
+
+    for utterance in &utterances {
+        let result = whisper.transcribe(&utterance.samples)?;
+        println!(
+            "  [{:.1}s] {}   ({:.0}ms inference)",
+            utterance.duration().as_secs_f32(),
+            result.text,
+            result.inference.as_secs_f32() * 1000.0
+        );
+    }
+
+    let wall = started.elapsed().as_secs_f32();
+    println!(
+        "\n{} utterance(s), {wall:.1}s wall for {audio_seconds:.1}s of audio ({:.1}x real time)",
+        utterances.len(),
+        audio_seconds / wall
+    );
+    Ok(())
+}
+
+/// Live transcription: capture, segment on speech, transcribe each utterance.
+///
+/// Whisper runs on its own thread. An utterance can be twenty seconds long and
+/// take a second or two to decode, and blocking the capture loop on that would
+/// back the frame channel up and start dropping audio.
+fn transcribe(device: Option<&str>, model: Model, seconds: u64) -> Result<()> {
+    let mut whisper = Whisper::load(model).context("loading whisper model")?;
+
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(512);
+    let (utterance_tx, utterance_rx) = crossbeam_channel::bounded::<Utterance>(16);
+
+    let capture = mic::start(device, frame_tx).context("starting microphone capture")?;
+
+    let worker = std::thread::Builder::new()
+        .name("jay-stt".into())
+        .spawn(move || {
+            for utterance in utterance_rx {
+                let spoken = utterance.duration();
+                let result = match whisper.transcribe(&utterance.samples) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(%e, "transcription failed");
+                        continue;
+                    }
+                };
+
+                if jay_stt::is_hallucination(&result.text) {
+                    tracing::debug!(text = %result.text, "dropped a whisper artefact");
+                    continue;
+                }
+
+                // Lag measured from the first sample of the utterance, which
+                // is the number a listener would actually notice.
+                let lag = utterance.started_at.elapsed();
+                println!(
+                    "[{}] {}\n      {:.1}s speech, {:.0}ms inference, {:.1}s behind live",
+                    utterance.channel.label(),
+                    result.text,
+                    spoken.as_secs_f32(),
+                    result.inference.as_secs_f32() * 1000.0,
+                    lag.as_secs_f32(),
+                );
+            }
+        })
+        .context("spawning the transcription thread")?;
+
+    let mut segmenter = SpeechSegmenter::new(Channel::Mic)?;
+    let started = Instant::now();
+    let unlimited = seconds == 0;
+
+    println!("transcribing with {model}. Speak.\n");
+
+    while unlimited || started.elapsed() < Duration::from_secs(seconds) {
+        let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(200)) else {
+            continue;
+        };
+        if let Some(utterance) = segmenter.push(&frame)
+            && utterance_tx.send(utterance).is_err()
+        {
+            break;
+        }
+    }
+
+    // Whatever was mid-sentence when time ran out is still worth having.
+    if let Some(tail) = segmenter.flush() {
+        let _ = utterance_tx.send(tail);
+    }
+    drop(utterance_tx);
+    let _ = worker.join();
+
+    println!("\ndropped samples: {}", capture.dropped_samples());
+    Ok(())
 }
 
 fn devices() -> Result<()> {
