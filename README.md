@@ -80,22 +80,33 @@ cargo run -p jay -- transcribe --assist --mode interview --brief cv.md
 
 | Mode | For | Shape |
 | --- | --- | --- |
-| `coding` | A live LeetCode-shaped round | Under 40 words. Approach, complexity, the edge case. No implementation. |
-| `system-design` | A live design round | Under 60 words, plain speech. The missing component or unnamed tradeoff. |
-| `rehearsal` | Practice, afterwards | The full debrief: what your attempt missed, then real code or a real diagram. |
-| `pairing` | Working with a colleague | Concrete and opinionated. Will happily give you SQL. |
+| `coding` | Practising a LeetCode-shaped round | Approach, compiling code, complexity, the edge cases a first attempt misses. |
+| `system-design` | Practising a design round | Capacity numbers, an ASCII component diagram, then the decisions and what each traded away. |
+| `rehearsal` | The debrief afterwards | What your attempt missed, quoted back, then the full worked answer. |
+| `pairing` | Working with a colleague | Concrete and opinionated. |
 | `dev` | A test went red | What is likely responsible and what to check first. |
 
-The live modes are terse because you are already talking, and it pays twice:
-measured on the same question, `pairing` took 17.9s and a live mode took 5.4s,
-because latency is dominated by how much gets generated. Constraining the answer
-to something sayable made it fast enough to actually use.
+Add `--hint` to any of them to be nudged instead of answered: the approach and
+the complexity, under forty words, no implementation. Use it when you want the
+rep rather than the answer.
 
-**`rehearsal` is the only mode that hands over a complete solution**, and there
-is a test that keeps it that way. Comparing your attempt against a good answer
-is how you get better — it is what every algorithms book does, after the
-exercise. Writing someone's solution while an employer is assessing them is a
-different product, and jay is not it.
+Length costs latency, so `--hint` is fast: measured on the same question, a
+full answer took 17.9s and a hint 5.4s, because the time goes on generating
+rather than thinking.
+
+### Context
+
+jay keeps the whole session — 600 lines — and chooses what to send at ask time.
+The problem statement is **pinned** the moment the interviewer says it, because
+it is spoken once and would otherwise scroll out of the window exactly when the
+questions get specific. The rest is a 1,200-word budget spent newest-first, with
+pure acknowledgements dropped: "Okay. Okay. Yeah. All right." costs tokens and
+carries nothing. The filter errs towards keeping — "Yes. Later today. Yeah."
+looks like noise and actually commits to a time.
+
+Note this is the opposite of the conclusion for `--brief`, where more context
+measurably made answers *worse*. Everything in the conversation is about the
+thing at hand; most of a 181-project memory index is not.
 
 **Give it a brief.** `--brief <file>` is standing context for the whole
 session — a job spec, your CV, the RFC you are pairing on, notes on the

@@ -15,8 +15,29 @@ use std::time::Duration;
 
 pub mod brief;
 pub mod claude;
+pub mod context;
 pub mod gate;
 pub mod screen;
+
+/// How much of an answer to give.
+///
+/// The two are genuinely different tools. Practising with a partner playing
+/// interviewer, you usually want the whole thing — the code, the diagram, the
+/// capacity numbers — because you are comparing your attempt against a good
+/// answer and that is how the comparison happens. But sometimes you want to be
+/// nudged rather than told, because being handed the answer too early robs you
+/// of the rep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Depth {
+    /// The worked answer: real compiling code, a real component diagram.
+    #[default]
+    Full,
+    /// A nudge: the approach, the complexity, the thing you are about to miss.
+    ///
+    /// Under forty words for coding, sixty for design, no implementation. Use
+    /// it when you want to solve it yourself and are stuck rather than lost.
+    Hint,
+}
 
 /// What jay is being used for. Changes what it is asked, not what it can see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,36 +85,62 @@ impl Mode {
     /// sentence. So jay is told, in every mode, not to restate what has
     /// already been covered. Arriving late is only a problem if you were
     /// trying to be first.
-    pub fn system_prompt(self) -> &'static str {
+    pub fn system_prompt(self, depth: Depth) -> &'static str {
+        if depth == Depth::Hint {
+            return match self {
+                Mode::Coding => {
+                    "The person is working through an algorithmic problem and \
+                     wants a nudge, not the answer. Under forty words, plain \
+                     speech, no formatting. Do not write the solution — they \
+                     want the rep. Name the approach or data structure, the \
+                     time and space complexity, or the one constraint that \
+                     breaks the naive version. If they already have it, say \
+                     the edge case they have not mentioned, or reply: covered."
+                }
+                Mode::SystemDesign => {
+                    "The person is working through a design problem and wants \
+                     a nudge, not the answer. Under sixty words, plain speech, \
+                     no code, no formatting. Give the missing component, the \
+                     unnamed tradeoff, or the failure mode they have not \
+                     considered. Prefer one excellent point to three adequate \
+                     ones. Give the boring solution teams actually ship: a \
+                     unique constraint rather than a distributed lock. If they \
+                     have covered it, reply: covered."
+                }
+                _ => Mode::Coding.system_prompt(Depth::Hint),
+            };
+        }
+
         match self {
             Mode::Coding => {
-                "The person you are helping is in a live algorithmic coding \
-                 interview. They are typing and talking at once, so brevity is \
-                 everything: under forty words, plain speech, no formatting. \
-                 Do not write their solution — they are the one being assessed \
-                 and a pasted implementation helps nobody. Give the shape \
-                 instead: name the approach or data structure, the time and \
-                 space complexity said as you would say it aloud, and the one \
-                 constraint that breaks the naive version (recursion depth on \
-                 large inputs, an overflow, an off-by-one at the boundary, the \
-                 empty case). If they already have the right approach, say the \
-                 edge case they have not mentioned, or reply: covered."
+                "The person is practising algorithmic interview questions with \
+                 a partner playing interviewer. Give the solution.\n\nOpen \
+                 with the approach in one sentence, so they can say it aloud \
+                 before any code exists. Then complete, idiomatic, compiling \
+                 code — Rust unless they say otherwise — with the invariant \
+                 that makes it correct named in a comment rather than left \
+                 implicit. Then the time and space complexity, phrased as they \
+                 would say it to an interviewer. Then the edge cases a first \
+                 attempt misses: the empty input, the single element, the \
+                 boundary, and whatever is specific to this problem.\n\nIf \
+                 the transcript shows they have already started, say what \
+                 their approach gets wrong or misses before giving yours."
             }
             Mode::SystemDesign => {
-                "The person you are helping is in a live system design \
-                 interview and is already speaking. Everything must be sayable \
-                 aloud immediately: plain spoken sentences, no code, no \
-                 markdown, no headings, no bullet lists, no formatting. At \
-                 most three points, most valuable first, under sixty words. \
-                 Prefer one excellent point to three adequate ones. If they \
-                 have covered it well, reply with the single word: covered. \
-                 Give the boring solution teams actually ship, not the \
-                 sophisticated one: a unique constraint rather than a \
-                 distributed lock, a cache rather than a custom protocol. \
-                 Interviewers mark people down for reaching past the problem, \
-                 and a candidate who names the simple mechanism and says why \
-                 it is enough sounds more senior than one who reaches for the \
-                 impressive answer."
+                "The person is practising system design questions with a \
+                 partner playing interviewer. Give the answer.\n\nOpen with \
+                 the numbers that drive the design — request rates, read to \
+                 write ratio, storage over the retention period — because \
+                 stating them first is what separates a designed system from a \
+                 remembered one. Then an ASCII component diagram showing the \
+                 data flow. Then each component in a line. Then the two or \
+                 three decisions that actually matter and what was traded away \
+                 for each. Say which parts you would cut first under time \
+                 pressure; knowing what is load-bearing is most of the \
+                 skill.\n\nPrefer the boring mechanism teams actually ship — \
+                 a unique constraint rather than a distributed lock. If the \
+                 transcript shows they have already started, say what their \
+                 answer misses before giving yours."
             }
             Mode::Rehearsal => {
                 "You are running the debrief after a mock interview. The \
@@ -166,39 +213,39 @@ mod tests {
     #[test]
     fn every_mode_has_a_distinct_system_prompt() {
         let prompts = [
-            Mode::Rehearsal.system_prompt(),
-            Mode::Pairing.system_prompt(),
-            Mode::Dev.system_prompt(),
+            Mode::Rehearsal.system_prompt(Depth::Full),
+            Mode::Pairing.system_prompt(Depth::Full),
+            Mode::Dev.system_prompt(Depth::Full),
         ];
         assert_ne!(prompts[0], prompts[1]);
         assert_ne!(prompts[1], prompts[2]);
     }
 
-    /// The line the whole design rests on, kept honest by a test.
-    ///
-    /// Practice hands over the complete answer, because comparing your attempt
-    /// against a good one is how you improve. The live modes never do: writing
-    /// someone's solution while an employer assesses them misrepresents them
-    /// to the person making the decision, and that is a different product.
+    /// The two depths are genuinely different tools, so a test keeps them so.
     #[test]
-    fn only_practice_hands_over_a_full_solution() {
-        let rehearsal = Mode::Rehearsal.system_prompt().to_lowercase();
-        assert!(rehearsal.contains("complete, idiomatic, compiling code"));
-        assert!(rehearsal.contains("ascii component diagram"));
+    fn depth_decides_whether_you_get_the_answer_or_a_nudge() {
+        // Full depth gives you the artefact you are practising against.
+        for mode in [Mode::Coding, Mode::Rehearsal] {
+            let prompt = mode.system_prompt(Depth::Full).to_lowercase();
+            assert!(
+                prompt.contains("compiling code"),
+                "{mode:?} at full depth should give code"
+            );
+        }
+        assert!(
+            Mode::SystemDesign
+                .system_prompt(Depth::Full)
+                .to_lowercase()
+                .contains("ascii component diagram")
+        );
 
-        let live = Mode::Coding.system_prompt().to_lowercase();
-        assert!(live.contains("do not write their solution"));
-        assert!(!live.contains("compiling code"));
-
-        // Each live mode forbids handing over the artefact in its own words.
-        assert!(Mode::SystemDesign.system_prompt().to_lowercase().contains("no code"));
-
-        // And both stay short enough to say out loud.
+        // A hint is a nudge, and says so.
         for mode in [Mode::Coding, Mode::SystemDesign] {
-            let prompt = mode.system_prompt().to_lowercase();
+            let prompt = mode.system_prompt(Depth::Hint).to_lowercase();
+            assert!(prompt.contains("nudge"), "{mode:?} hint should be a nudge");
             assert!(
                 prompt.contains("under forty words") || prompt.contains("under sixty words"),
-                "{mode:?} should cap its length"
+                "{mode:?} hint should cap its length"
             );
         }
     }

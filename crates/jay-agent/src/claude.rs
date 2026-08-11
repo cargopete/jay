@@ -29,6 +29,7 @@ const TIMEOUT: Duration = Duration::from_secs(45);
 pub struct Claude {
     model: String,
     binary: String,
+    depth: crate::Depth,
     /// Standing context for the whole session: a job spec, a CV, the RFC being
     /// paired on, notes on the architecture.
     ///
@@ -50,8 +51,16 @@ impl Claude {
         Self {
             model: model.into(),
             binary: std::env::var("JAY_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string()),
+            depth: crate::Depth::default(),
             brief: None,
         }
+    }
+
+    /// Ask for a nudge rather than the worked answer.
+    #[must_use]
+    pub fn with_depth(mut self, depth: crate::Depth) -> Self {
+        self.depth = depth;
+        self
     }
 
     /// Give jay standing context for the session.
@@ -113,7 +122,7 @@ impl Claude {
             .arg("--allowed-tools")
             .arg(if screenshot.is_some() { "Read" } else { "" })
             .arg("--append-system-prompt")
-            .arg(format!("{}{}", mode.system_prompt(), crate::LATE_ARRIVAL))
+            .arg(format!("{}{}", mode.system_prompt(self.depth), crate::LATE_ARRIVAL))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -209,6 +218,15 @@ fn build_prompt(
         prompt.push_str("\n\n");
     }
 
+    // The problem statement is spoken once, at the start, and then scrolls out
+    // of a rolling window while the discussion runs on. jay heard it; without
+    // pinning it, jay then forgets it exactly when the questions get specific.
+    if let Some(problem) = transcript.iter().find(|line| line.starts_with("PROBLEM: ")) {
+        prompt.push_str("The problem being worked on:\n  ");
+        prompt.push_str(problem.trim_start_matches("PROBLEM: "));
+        prompt.push_str("\n\n");
+    }
+
     if !transcript.is_empty() {
         prompt.push_str("Recent conversation, oldest first:\n");
         for line in transcript {
@@ -273,6 +291,21 @@ fn build_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinned_problem_leads_the_prompt() {
+        let prompt = build_prompt(
+            Mode::SystemDesign,
+            "how would you shard it?",
+            &[
+                "PROBLEM: Design a URL shortener.".to_string(),
+                "you: so the read path dominates".to_string(),
+            ],
+            None,
+        );
+        assert!(prompt.starts_with("The problem being worked on:"));
+        assert!(prompt.contains("URL shortener"));
+    }
 
     #[test]
     fn prompt_carries_the_question_and_transcript() {

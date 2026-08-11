@@ -117,6 +117,9 @@ enum Command {
         /// prompts actually helps.
         #[arg(long)]
         context: Option<std::path::PathBuf>,
+        /// Nudge me instead of answering: approach and complexity, no code.
+        #[arg(long)]
+        hint: bool,
         /// Also send what is on screen right now.
         ///
         /// Captures the focused window at the moment of asking, not
@@ -251,6 +254,7 @@ fn main() -> Result<()> {
             model,
             brief,
             context,
+            hint,
             screen,
         } => ask(
             &question,
@@ -258,6 +262,7 @@ fn main() -> Result<()> {
             &model,
             brief.as_deref(),
             context.as_deref(),
+            hint,
             screen,
         ),
     }
@@ -425,11 +430,29 @@ fn transcribe(
         .map_err(|e| anyhow::anyhow!("overlay: {e}"))
 }
 
-/// Lines of conversation sent with each suggestion.
-const CONTEXT_LINES: usize = 12;
+/// Transcript lines retained for the session.
+///
+/// Generous on purpose: this is the raw record, and it is cheap. What actually
+/// gets sent is chosen from it at ask time by
+/// [`jay_agent::context::window`], which spends a word budget on the lines
+/// that carry meaning and drops "Okay. Yeah. Right."
+const CONTEXT_LINES: usize = 600;
 
 /// Recent transcript, shared between the transcriber and the "ask" button.
 type SharedHistory = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// The problem statement, pinned for the session.
+///
+/// It is spoken once, at the start, and then scrolls out of a rolling window
+/// while the discussion runs on for twenty minutes. jay heard it; without this
+/// it forgets it exactly when the questions get specific.
+type PinnedProblem = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// Words before an interviewer's utterance is taken to be the problem.
+///
+/// "Right, shall we start?" is not the problem. "Given a two-dimensional grid
+/// of ones and zeros, count the number of islands" is.
+const PROBLEM_MIN_WORDS: usize = 9;
 
 /// Utterances quieter than this are treated as whisper inventing things.
 ///
@@ -570,6 +593,7 @@ fn run_pipeline(
     let history: SharedHistory = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::VecDeque::with_capacity(CONTEXT_LINES),
     ));
+    let problem: PinnedProblem = std::sync::Arc::new(std::sync::Mutex::new(None));
 
     // The assistant runs whenever anything can ask it: the automatic gate
     // (`--assist`) or the panel's button. The button is the primary trigger, so
@@ -614,17 +638,13 @@ fn run_pipeline(
     // is almost always the thing being discussed.
     if let (Some(tx), Some(rx)) = (question_tx.clone(), requests) {
         let history = std::sync::Arc::clone(&history);
+        let problem = std::sync::Arc::clone(&problem);
         let lines = lines.clone();
         std::thread::Builder::new()
             .name("jay-hand-ask".into())
             .spawn(move || {
                 for jay_ui::Request::Suggest in rx {
-                    let context: Vec<String> = history
-                        .lock()
-                        .expect("transcript history poisoned")
-                        .iter()
-                        .cloned()
-                        .collect();
+                    let context = with_problem(&problem, &history);
 
                     let screenshot = match jay_agent::screen::capture(
                         jay_agent::screen::Target::FocusedWindow,
@@ -668,6 +688,7 @@ fn run_pipeline(
         .name("jay-stt".into())
         .spawn({
             let history = std::sync::Arc::clone(&history);
+            let problem = std::sync::Arc::clone(&problem);
             move || {
             let mut last_suggestion: Option<Instant> = None;
             for utterance in utterance_rx {
@@ -710,6 +731,18 @@ fn run_pipeline(
                     continue;
                 }
 
+                // The first substantial thing the interviewer says is the
+                // problem. Captured once and kept for the whole session.
+                if utterance.channel == Channel::System
+                    && result.text.split_whitespace().count() >= PROBLEM_MIN_WORDS
+                {
+                    let mut pinned = problem.lock().expect("pinned problem poisoned");
+                    if pinned.is_none() {
+                        tracing::info!(problem = %result.text, "pinned the problem statement");
+                        *pinned = Some(result.text.clone());
+                    }
+                }
+
                 {
                     let line = format!("{}: {}", utterance.channel.label(), result.text);
                     let mut history = history.lock().expect("transcript history poisoned");
@@ -741,12 +774,7 @@ fn run_pipeline(
                         .unwrap_or(true);
                     if ready {
                         last_suggestion = Some(Instant::now());
-                        let context = history
-                            .lock()
-                            .expect("transcript history poisoned")
-                            .iter()
-                            .cloned()
-                            .collect();
+                        let context = with_problem(&problem, &history);
                         let _ = tx.send(Ask {
                             question: asked,
                             context,
@@ -832,6 +860,7 @@ fn ask(
     model: &str,
     brief: Option<&std::path::Path>,
     context: Option<&std::path::Path>,
+    hint: bool,
     screen: bool,
 ) -> Result<()> {
     // No gate here. The gate exists to filter speech jay merely overheard;
@@ -864,7 +893,11 @@ fn ask(
         None => Vec::new(),
     };
 
-    let mut claude = jay_agent::claude::Claude::new(model);
+    let mut claude = jay_agent::claude::Claude::new(model).with_depth(if hint {
+        jay_agent::Depth::Hint
+    } else {
+        jay_agent::Depth::Full
+    });
     if let Some(path) = brief {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading the brief at {}", path.display()))?;
@@ -922,6 +955,25 @@ fn brief(
     println!("Then fill in the 'Who you are' section — that part changes the");
     println!("answers most, and no generator can write it for you.");
     Ok(())
+}
+
+/// The rolling window, with the pinned problem at its head.
+fn with_problem(problem: &PinnedProblem, history: &SharedHistory) -> Vec<String> {
+    let mut context = Vec::with_capacity(CONTEXT_LINES + 1);
+    if let Some(text) = problem.lock().expect("pinned problem poisoned").as_ref() {
+        context.push(format!("PROBLEM: {text}"));
+    }
+    let all: Vec<String> = history
+        .lock()
+        .expect("transcript history poisoned")
+        .iter()
+        .cloned()
+        .collect();
+    context.extend(jay_agent::context::window(
+        &all,
+        jay_agent::context::WORD_BUDGET,
+    ));
+    context
 }
 
 fn devices() -> Result<()> {
