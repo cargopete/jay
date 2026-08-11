@@ -257,3 +257,104 @@ decision to take deliberately rather than drift into.
 Not an API key. The `claude` CLI already holds the OAuth session, so headless
 invocation uses the subscription. Worth noting the metering rules here have
 been in flux and should be checked against current policy rather than assumed.
+
+## A reading beats a guess, twice over
+
+Two faults found the same way, in the same session, and they are the same fault.
+
+**The preflight lied about the microphone.** `jay check` printed `mic OK` on
+the strength of the device *existing* — it called `input_devices()` and never
+pulled a sample. macOS answers a refused microphone with perfect digital
+silence rather than an error, so the check would have printed OK on a machine
+that could not hear a thing. It now records for three seconds and judges the
+samples: no frames is one fault, frames of exact zeros is a refused permission,
+and a peak below 0.02 is a room where nobody spoke. Three different fixes,
+three different messages.
+
+**The panel could not tell silence from deafness.** Between a sound arriving
+and a sentence appearing there are about ten seconds of VAD and whisper. For
+all ten, an empty panel means either "nobody has spoken" or "nothing is being
+heard", and those look identical. There are now two meters fed by the RMS of
+the actual samples, with the VAD's own speech decision beside them. A channel
+that has never delivered a frame reads `OFF`, one whose frames have stopped
+reads `NO INPUT` in ember, and neither is drawn the same as `QUIET`.
+
+The general form: **jay must never report a state it has not measured.** An
+instrument bound to a real value is worth more than any amount of careful
+reasoning about what ought to be happening.
+
+## The silence floor was measured against the wrong number
+
+A session where a clear "reverse a linked list" was spoken into a working
+microphone produced an empty transcript. The audio was fine, whisper
+transcribed it, and then jay threw it away.
+
+`HALLUCINATION_FLOOR` guards against whisper inventing fluent sentences out of
+room tone, and it was compared against the RMS of the whole utterance. But
+every utterance carries ~250 ms of pre-roll and ~600 ms of trailing silence by
+construction, because that is how the segmenter finds its boundaries. So the
+number being tested scaled with how long the pause afterwards was rather than
+with how loudly anyone spoke, and a short sentence with a normal pause after it
+was diluted below a floor that a long one cleared easily. On this machine the
+room reads 0.0028 and the floor was 0.01, so the margin was never wide.
+
+The utterance now carries `speech_peak`, the loudest frame the VAD actually
+called speech, and the floor is compared against that. Pre-roll and trailing
+silence cannot move it.
+
+The drop was also logged at `debug` and nowhere else, which is what made it
+cost a whole session: a run where every utterance was binned looked exactly
+like a run where nobody spoke. Both filters now say so in the panel.
+
+## Two prompts, one of them lying
+
+`coding` mode returned five paragraphs of prose and no code at all, which is
+the one thing it exists to produce. The system prompt asked for "complete,
+idiomatic, compiling code". The user prompt built alongside it, in the same
+call, said "Not the code — the insight that makes the code obvious."
+
+Both were true when written. The tails in `build_prompt` were written when
+every mode was a nudge, and were never revisited when `Depth::Full` arrived and
+the system prompts grew to describe whole worked answers. The tail won.
+
+At full depth the tail now states the question and stops. **The shape of the
+answer is the system prompt's job, and exactly one place may hold it.** A test
+asserts full depth never forbids the code it is being asked for.
+
+## Latency is output length, and nothing else much
+
+Measured, all on this machine against the Max subscription:
+
+| | |
+| --- | --- |
+| Spawn, preamble, one round trip, one word back | 4.7s |
+| Screenshot inline, one sentence back | 4.7s |
+| Coding answer, uncapped prompt | 77s |
+| Coding answer, capped prompt | 9.4s |
+
+Three things follow.
+
+**The 4.7s floor is not negotiable** while jay drives the CLI. It is node
+startup plus ~29,000 tokens of Claude Code preamble, and it is paid whether the
+answer is one word or one page.
+
+**The `Read` tool call for the screenshot was pure waste.** jay wrote the JPEG,
+then handed the model a path and enabled a tool so it could open the file jay
+had just written — an entire extra round trip, about as long as the floor
+itself. The image now goes in as a base64 block via `--input-format
+stream-json`, which costs the same as sending nothing, and no tools need be
+enabled at all.
+
+**Everything else is output length.** 77 seconds versus 9.4 for the same
+question is not the model thinking harder, it is the model writing an
+alternatives section and an aside about what the interviewer might prefer.
+Neither is a better answer to read while you are talking. Both interview modes
+now carry a hard word cap, and a test enforces that they do. Rehearsal is
+exempt, because it runs after the interview where thoroughness costs nobody
+the thread.
+
+Streaming does not change any of these numbers, and is still the largest
+improvement of the four: with `--output-format stream-json
+--include-partial-messages` the panel paints the answer as it is written, so
+the first words arrive around five seconds instead of the whole thing at
+fourteen. Late help is only useless if you cannot start reading it.

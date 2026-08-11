@@ -115,33 +115,40 @@ impl Mode {
         match self {
             Mode::Coding => {
                 "The person is practising algorithmic interview questions with \
-                 a partner playing interviewer. Give the solution.\n\nOpen \
-                 with the approach in one sentence, so they can say it aloud \
-                 before any code exists. Then complete, idiomatic, compiling \
-                 code — Rust unless they say otherwise — with the invariant \
-                 that makes it correct named in a comment rather than left \
-                 implicit. Then the time and space complexity, phrased as they \
-                 would say it to an interviewer. Then the edge cases a first \
-                 attempt misses: the empty input, the single element, the \
-                 boundary, and whatever is specific to this problem.\n\nIf \
-                 the transcript shows they have already started, say what \
-                 their approach gets wrong or misses before giving yours."
+                 a partner playing interviewer, and is mid-interview. Give the \
+                 solution in exactly this shape and nothing else:\n\n\
+                 1. The approach, in one sentence they can say aloud.\n\
+                 2. The code: complete, idiomatic, compiling — Rust unless \
+                 they say otherwise — with the invariant that makes it correct \
+                 named in one comment.\n\
+                 3. One line: time and space complexity.\n\
+                 4. At most three edge cases, one line each.\n\n\
+                 Hard limit: under 120 words of prose in total, outside the \
+                 code. No preamble, no alternative implementations, no asides \
+                 about what the interviewer might prefer, no closing summary. \
+                 They are reading this while talking, and every sentence past \
+                 the fourth costs them the thread. If the transcript shows \
+                 they have already started, say what their approach gets \
+                 wrong in one line before giving yours."
             }
             Mode::SystemDesign => {
                 "The person is practising system design questions with a \
-                 partner playing interviewer. Give the answer.\n\nOpen with \
-                 the numbers that drive the design — request rates, read to \
+                 partner playing interviewer, and is mid-interview. Give the \
+                 answer in exactly this shape and nothing else:\n\n\
+                 1. The numbers that drive the design — request rates, read to \
                  write ratio, storage over the retention period — because \
                  stating them first is what separates a designed system from a \
-                 remembered one. Then an ASCII component diagram showing the \
-                 data flow. Then each component in a line. Then the two or \
-                 three decisions that actually matter and what was traded away \
-                 for each. Say which parts you would cut first under time \
-                 pressure; knowing what is load-bearing is most of the \
-                 skill.\n\nPrefer the boring mechanism teams actually ship — \
-                 a unique constraint rather than a distributed lock. If the \
-                 transcript shows they have already started, say what their \
-                 answer misses before giving yours."
+                 remembered one.\n\
+                 2. An ASCII component diagram of the data flow.\n\
+                 3. Each component in one line.\n\
+                 4. The two or three decisions that actually matter, one line \
+                 each, saying what was traded away.\n\n\
+                 Hard limit: under 200 words of prose in total, outside the \
+                 diagram. No preamble, no closing summary. Prefer the boring \
+                 mechanism teams actually ship — a unique constraint rather \
+                 than a distributed lock. If the transcript shows they have \
+                 already started, say what their answer misses in one line \
+                 before giving yours."
             }
             Mode::Rehearsal => {
                 "You are running the debrief after a mock interview. The \
@@ -229,8 +236,21 @@ mod tests {
         for mode in [Mode::Coding, Mode::Rehearsal] {
             let prompt = mode.system_prompt(Depth::Full).to_lowercase();
             assert!(
-                prompt.contains("compiling code"),
+                prompt.contains("compiling") && prompt.contains("code"),
                 "{mode:?} at full depth should give code"
+            );
+        }
+
+        // The two mid-interview modes must cap their length, or they write an
+        // essay: uncapped, "reverse a linked list" came back as 77 seconds of
+        // alternatives and asides. Rehearsal is deliberately exempt — it runs
+        // after the interview, where being thorough costs nobody the thread.
+        for mode in [Mode::Coding, Mode::SystemDesign] {
+            assert!(
+                mode.system_prompt(Depth::Full)
+                    .to_lowercase()
+                    .contains("hard limit"),
+                "{mode:?} is read mid-interview and must cap its length"
             );
         }
         assert!(

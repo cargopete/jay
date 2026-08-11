@@ -191,9 +191,16 @@ enum Command {
         /// What kind of help to offer when you press the button.
         #[arg(long, value_enum, default_value_t = AskMode::Pairing)]
         mode: AskMode,
-        /// Hard ceiling on what this session may spend, in dollars.
-        #[arg(long, default_value_t = 2.0)]
-        budget: f64,
+        /// Stop suggesting after this many dollars. Unlimited by default.
+        ///
+        /// There was a $2.00 default here, on the reasoning that a runaway
+        /// agent is the expensive failure mode of this whole idea. It is not
+        /// the failure mode of *this* design: jay only ever spends when the
+        /// button is pressed, so the ceiling is your finger. A limit that can
+        /// only ever interrupt a real session mid-question is a limit worth
+        /// removing.
+        #[arg(long)]
+        budget: Option<f64>,
         /// Standing context for the session: a job spec, a CV, an RFC.
         ///
         /// Read once at startup and sent with every suggestion. The single
@@ -438,6 +445,9 @@ fn transcribe(
                                 line.text
                             ),
                             jay_ui::Kind::Notice => writeln!(file, "[{clock}] ({})", line.text),
+                            // The finished suggestion is archived; the forty
+                            // drafts of it on the way there are not.
+                            jay_ui::Kind::Partial => Ok(()),
                         };
                         if written.is_err() {
                             return;
@@ -466,6 +476,9 @@ fn transcribe(
                             }
                             println!("  └───────────────────\n");
                         }
+                        // Partials are for the panel; a terminal would just
+                        // print the answer forty times as it grew.
+                        jay_ui::Kind::Partial => {}
                         jay_ui::Kind::Notice => println!("  ({})", line.text),
                         jay_ui::Kind::Transcript => println!(
                             "[{}] {}   ({:.1}s behind)",
@@ -488,6 +501,7 @@ fn transcribe(
             assist,
             None,
             brief,
+            std::sync::Arc::new(jay_audio::Levels::default()),
         );
         if let Some(handle) = saver {
             let _ = handle.join();
@@ -496,11 +510,19 @@ fn transcribe(
         return result;
     }
 
+    // Input levels, written by the capture loop and read by the panel. The
+    // panel needs a reading that does not depend on whisper: between a sound
+    // arriving and a sentence appearing there are about ten seconds, and for
+    // those ten seconds a dead microphone looks exactly like a quiet room.
+    let levels = std::sync::Arc::new(jay_audio::Levels::default());
+
     // The whole pipeline moves to a background thread: on macOS the windowing
     // event loop insists on the main thread and will not negotiate.
     std::thread::Builder::new()
         .name("jay-pipeline".into())
-        .spawn(move || {
+        .spawn({
+            let levels = std::sync::Arc::clone(&levels);
+            move || {
             if let Err(e) = run_pipeline(
                 source,
                 device.as_deref(),
@@ -510,13 +532,15 @@ fn transcribe(
                 assist,
                 Some(request_rx),
                 brief,
+                levels,
             ) {
                 tracing::error!(%e, "capture pipeline stopped");
+            }
             }
         })
         .context("spawning the capture pipeline")?;
 
-    jay_ui::run(line_rx, request_tx, model.to_string())
+    jay_ui::run(line_rx, request_tx, model.to_string(), levels)
         .map_err(|e| anyhow::anyhow!("overlay: {e}"))
 }
 
@@ -544,21 +568,33 @@ type PinnedProblem = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 /// of ones and zeros, count the number of islands" is.
 const PROBLEM_MIN_WORDS: usize = 9;
 
-/// Utterances quieter than this are treated as whisper inventing things.
+/// How often a part-written answer is repainted.
 ///
-/// Real speech at conversational distance sits well above this; the room tone
-/// that fools the VAD sits well below.
+/// Fast enough to read as live, slow enough that the panel is not redrawn once
+/// per token for ten seconds.
+const PARTIAL_PAINT_INTERVAL: Duration = Duration::from_millis(120);
+
+/// Speech peak below which a transcript is treated as whisper inventing things.
+///
+/// Compared against [`Utterance::speech_peak`], never against the mean over the
+/// whole utterance. The mean includes ~250 ms of pre-roll and ~600 ms of
+/// trailing silence, so it scales with how long the pause afterwards was rather
+/// than with how loudly anyone spoke — which quietly binned a perfectly clear
+/// "reverse a linked list" on this machine, whose room floor measures 0.0028.
+///
+/// A single frame peak from a voice at a laptop's distance clears this by a
+/// wide margin. Room tone does not.
 const HALLUCINATION_FLOOR: f32 = 0.01;
 
 /// Settings for the half of jay that costs money.
 #[derive(Debug, Clone, Copy)]
 struct Assist {
     mode: jay_agent::Mode,
-    /// Hard ceiling on what one session may spend, in dollars.
+    /// Stop suggesting after this many dollars, if set at all.
     ///
-    /// A soft ceiling in truth: checked before a call rather than during one,
-    /// so a session overshoots by whatever was in flight.
-    budget_usd: f64,
+    /// Soft in any case: checked before a call rather than during one, so a
+    /// session overshoots by whatever was in flight.
+    budget_usd: Option<f64>,
 }
 
 /// A question plus the conversation around it.
@@ -596,15 +632,29 @@ fn spawn_assistant(
                 screenshot,
             } in questions
             {
-                if spent >= assist.budget_usd {
+                if assist.budget_usd.is_some_and(|cap| spent >= cap) {
                     // Said once, then the loop keeps draining so the sender
                     // never blocks on a full channel.
                     continue;
                 }
 
                 let started = Instant::now();
-                let outcome =
-                    claude.suggest_with(assist.mode, &question, &context, screenshot.as_deref());
+                // Throttled: the model emits deltas far faster than anyone
+                // reads, and a repaint per token would spend more time drawing
+                // the answer than generating it.
+                let mut last_paint = Instant::now();
+                let outcome = claude.suggest_streaming(
+                    assist.mode,
+                    &question,
+                    &context,
+                    screenshot.as_deref(),
+                    |so_far| {
+                        if last_paint.elapsed() >= PARTIAL_PAINT_INTERVAL {
+                            last_paint = Instant::now();
+                            let _ = lines.send(jay_ui::Line::partial(so_far.to_string()));
+                        }
+                    },
+                );
                 // Somebody's work in progress. It does not linger.
                 if let Some(path) = &screenshot {
                     let _ = std::fs::remove_file(path);
@@ -616,14 +666,21 @@ fn spawn_assistant(
                             suggestion.text,
                             started.elapsed(),
                         ));
-                        let _ = lines.send(jay_ui::Line::notice(format!(
-                            "{:.1}s · ${:.3} · ${:.2} of ${:.2} spent",
-                            suggestion.latency.as_secs_f32(),
-                            suggestion.cost_usd,
-                            spent,
-                            assist.budget_usd
-                        )));
-                        if spent >= assist.budget_usd {
+                        let _ = lines.send(jay_ui::Line::notice(match assist.budget_usd {
+                            Some(cap) => format!(
+                                "{:.1}s · ${:.3} · ${:.2} of ${cap:.2} spent",
+                                suggestion.latency.as_secs_f32(),
+                                suggestion.cost_usd,
+                                spent,
+                            ),
+                            None => format!(
+                                "{:.1}s · ${:.3} · ${:.2} this session",
+                                suggestion.latency.as_secs_f32(),
+                                suggestion.cost_usd,
+                                spent,
+                            ),
+                        }));
+                        if assist.budget_usd.is_some_and(|cap| spent >= cap) {
                             let _ = lines.send(jay_ui::Line::notice(
                                 "session budget reached. jay is listening but will not \
                                  suggest again until you restart it."
@@ -650,6 +707,7 @@ fn run_pipeline(
     assist: Assist,
     requests: Option<crossbeam_channel::Receiver<jay_ui::Request>>,
     brief: Option<String>,
+    levels: std::sync::Arc<jay_audio::Levels>,
 ) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
 
@@ -699,11 +757,18 @@ fn run_pipeline(
                 rx,
                 lines.clone(),
             )?;
-            let _ = lines.send(jay_ui::Line::notice(format!(
-                "ready in {:?} mode, up to ${:.2} this session. I will not say \
-                 anything until you press ask jay.",
-                settings.mode, settings.budget_usd
-            )));
+            let _ = lines.send(jay_ui::Line::notice(match settings.budget_usd {
+                Some(cap) => format!(
+                    "ready in {:?} mode, up to ${cap:.2} this session. I will \
+                     not say anything until you press ask jay.",
+                    settings.mode
+                ),
+                None => format!(
+                    "ready in {:?} mode. I will not say anything until you \
+                     press ask jay.",
+                    settings.mode
+                ),
+            }));
             (Some(tx), Some(handle))
         }
         None => (None, None),
@@ -799,6 +864,9 @@ fn run_pipeline(
 
                 if jay_stt::is_hallucination(&result.text) {
                     tracing::debug!(text = %result.text, "dropped a whisper artefact");
+                    let _ = lines.send(jay_ui::Line::notice(
+                        "dropped a known whisper artefact".to_string(),
+                    ));
                     continue;
                 }
 
@@ -818,12 +886,20 @@ fn run_pipeline(
                 // in a question mark and triggered a paid escalation. A stock
                 // phrase list cannot catch novel inventions; the level of the
                 // audio can. Quiet in, distrusted out.
-                if utterance.rms() < HALLUCINATION_FLOOR {
+                if utterance.speech_peak < HALLUCINATION_FLOOR {
                     tracing::debug!(
-                        rms = utterance.rms(),
+                        peak = utterance.speech_peak,
                         text = %result.text,
                         "dropped a transcript from near-silent audio"
                     );
+                    // Say so. This used to be a debug log and nothing else,
+                    // which meant a session where every utterance was binned
+                    // looked precisely like a session where nobody spoke.
+                    let _ = lines.send(jay_ui::Line::notice(format!(
+                        "heard {:.1}s at peak {:.4} — too quiet to trust, dropped",
+                        spoken.as_secs_f32(),
+                        utterance.speech_peak
+                    )));
                     continue;
                 }
 
@@ -880,11 +956,18 @@ fn run_pipeline(
         let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(200)) else {
             continue;
         };
+        // Take the reading before segmenting, so the meter reports what
+        // arrived rather than what survived the VAD.
+        let meter = levels.meter(frame.channel);
+        meter.record(frame.rms());
+
         let segmenter = match frame.channel {
             Channel::Mic => &mut mic_segmenter,
             Channel::System => &mut system_segmenter,
         };
-        if let Some(utterance) = segmenter.push(&frame) {
+        let utterance = segmenter.push(&frame);
+        meter.set_speaking(segmenter.is_speaking());
+        if let Some(utterance) = utterance {
             // Same rule one layer up: whisper is slower than speech in the
             // worst case, and a stalled capture loop loses audio outright,
             // whereas a skipped utterance loses one sentence and says so.
@@ -1007,6 +1090,31 @@ fn ask(
 }
 
 /// Pre-flight. Tries each capability for real rather than asking macOS.
+/// Peak RMS a normal speaking voice reaches at a normal distance, measured on
+/// this machine. Used only to tell "working but nobody spoke" from "working".
+const SPEECH_FLOOR: f32 = 0.02;
+
+/// Collect frames for a fixed window and report how many arrived and how loud
+/// the loudest was.
+///
+/// Deliberately returns the count as well as the level: no frames at all is a
+/// different fault from frames full of zeros, and the two have different fixes.
+fn drain(rx: &crossbeam_channel::Receiver<Frame>, window: Duration) -> (u64, f32) {
+    let deadline = Instant::now() + window;
+    let (mut frames, mut peak) = (0u64, 0.0f32);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left.min(Duration::from_millis(250))) {
+            Ok(frame) => {
+                frames += 1;
+                peak = peak.max(frame.rms());
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    (frames, peak)
+}
+
 fn check(out: &std::path::Path) -> Result<()> {
     use std::fmt::Write as _;
     let mut report = String::new();
@@ -1019,22 +1127,71 @@ fn check(out: &std::path::Path) -> Result<()> {
     note(format!("jay {} preflight", env!("CARGO_PKG_VERSION")));
     note(String::new());
 
-    // Microphone. Opening the device is enough: a denied mic yields silence
-    // rather than an error, so this proves availability, not permission.
+    // Microphone. This used to print OK on the strength of the device merely
+    // existing, which is worthless: macOS answers a refused microphone with
+    // perfect digital silence rather than an error, so the device is present
+    // and named and delivers nothing. A session was lost to exactly that.
+    //
+    // So listen for real, and judge on the samples.
     match mic::input_devices() {
-        Ok(names) if !names.is_empty() => note(format!("  mic       OK   {}", names.join(", "))),
+        Ok(names) if !names.is_empty() => {
+            note(format!("  mic       …    listening to {}", names.join(", ")));
+            let (tx, rx) = crossbeam_channel::bounded::<Frame>(256);
+            match mic::start(None, tx) {
+                Ok(capture) => {
+                    let (frames, peak) = drain(&rx, Duration::from_secs(3));
+                    let dropped = capture.dropped_samples();
+                    capture.stop();
+                    if frames == 0 {
+                        note("  mic       FAIL device opened but delivered no frames".to_string());
+                    } else if peak == 0.0 {
+                        // Not a quiet room. A room has a noise floor; exact
+                        // zeros across three seconds is the system saying no.
+                        note(format!(
+                            "  mic       FAIL {frames} frames of pure digital silence"
+                        ));
+                        note("            → this is a refused permission, not a quiet room".to_string());
+                        note("            → System Settings › Privacy & Security › Microphone".to_string());
+                    } else {
+                        note(format!(
+                            "  mic       OK   {frames} frames, peak {peak:.4} RMS{}",
+                            if dropped > 0 {
+                                format!(", {dropped} samples dropped")
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        if peak < SPEECH_FLOOR {
+                            note(format!(
+                                "            → very quiet. Speech reads about {SPEECH_FLOOR:.2};                                  say something during the check"
+                            ));
+                        }
+                    }
+                }
+                Err(e) => note(format!("  mic       FAIL {e}")),
+            }
+        }
         Ok(_) => note("  mic       FAIL no input devices".to_string()),
         Err(e) => note(format!("  mic       FAIL {e}")),
     }
 
     // System audio. This one really does need the LaunchServices launch, and
     // failing here before a call is worth ten minutes of confusion during one.
-    let (tx, _rx) = crossbeam_channel::bounded::<Frame>(64);
+    //
+    // Unlike the microphone, silence here is not evidence of anything: nothing
+    // may be playing. The level is reported rather than judged.
+    let (tx, rx) = crossbeam_channel::bounded::<Frame>(256);
     match jay_audio::system::start(tx) {
-        Ok(capture) => note(format!(
-            "  system    OK   tap running at {} Hz",
-            capture.device_sample_rate()
-        )),
+        Ok(capture) => {
+            let rate = capture.device_sample_rate();
+            let (frames, peak) = drain(&rx, Duration::from_secs(3));
+            note(format!(
+                "  system    OK   tap at {rate} Hz, {frames} frames, peak {peak:.4} RMS"
+            ));
+            if peak == 0.0 {
+                note("            → silent, which is expected unless something was playing".to_string());
+            }
+        }
         Err(e) => {
             note(format!("  system    FAIL {e}"));
             note("            → launch from the .app bundle: open -a …/jay.app --args check".to_string());

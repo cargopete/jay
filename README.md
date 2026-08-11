@@ -59,12 +59,18 @@ cat /tmp/jay-check.txt
 You want five OKs:
 
 ```
-  mic       OK   MacBook Pro Microphone
-  system    OK   tap running at 48000 Hz
+  mic       OK   46 frames, peak 0.0028 RMS
+  system    OK   tap at 48000 Hz, 0 frames, peak 0.0000 RMS
   screen    OK   captured 676 KB
   whisper   OK   …/ggml-small.en.bin
   claude    OK   4.4s, $0.0036 — cache is now warm
 ```
+
+The microphone line is a real three-second recording, not a device listing.
+Say something during the check and the peak should jump above 0.02; a room at
+rest reads around 0.003. **Exact zeros are a refused permission, not a quiet
+room** — macOS answers a denied microphone with perfect silence rather than an
+error, so the only way to tell is to look at the samples.
 
 If `screen` or `system` fails, jay has just asked macOS for that permission, so
 it now appears in **System Settings › Privacy & Security › Screen & System Audio
@@ -133,7 +139,7 @@ jay transcribe --overlay --source both --mode coding \
 | `--overlay` | Floating panel instead of terminal output. |
 | `--mode` | What kind of answer the button gives. See below. |
 | `--brief` | Standing context for the session. |
-| `--budget` | Dollars this session may spend. Default 2.00. |
+| `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
 | `--seconds` | `0` runs until you close the panel. |
 | `--model` | Whisper size: `tiny`, `base`, `small`. Default `small`. |
@@ -206,14 +212,26 @@ specific. The rest is a 1,200-word budget spent newest-first, with pure
 acknowledgements dropped — "Okay. Okay. Yeah. All right." costs tokens and
 carries nothing.
 
+**Levels.** Two meters above the transcript, fed by the RMS of the actual
+samples, with the VAD's speech decision beside them. They exist because there
+are about ten seconds between a sound arriving and a sentence appearing, and
+until there was a meter, a dead microphone and a quiet room looked identical
+for all ten of them.
+
 **The answer.** Recent conversation, the pinned problem, your brief and a
 screenshot of the display, through `claude -p` on your subscription.
 
 The screenshot is scaled to 1800px on the long edge and written as JPEG, which
-took it from 8.5 MB to 676 KB. The model's high-resolution tier caps at 2576px
-anyway, so everything above that was upload time spent on pixels nobody reads,
-and PNG's losslessness buys nothing when the reader is a model looking at a
-stack trace.
+took it from 8.5 MB to 676 KB, and goes in as an inline image block rather than
+a path for the model to open with `Read`. That tool call was a whole extra
+round trip — measured at about four seconds, the same as the entire spawn and
+preamble floor — spent fetching a file jay already had in hand. It also means
+no tools need be enabled at all.
+
+**Streaming.** The answer is painted as it is written. Total time is unchanged;
+the first words land at about five seconds instead of the whole thing at
+fourteen, and five seconds into a conversation you can still use what you
+read.
 
 ---
 
@@ -244,9 +262,16 @@ Measured on an M3 Pro, driving a Max subscription.
 
 | | |
 | --- | --- |
+| Spawn, preamble and one round trip | 4.7s — the floor, before any answer |
 | A hint | ~5s, ~$0.14 |
-| A full answer with code or a diagram | ~16–20s, ~$0.20 |
+| A coding answer with working Rust | ~9s, ~$0.19, first words at ~5s |
 | Idle, listening | 12–25% of one core, ~19 MB |
+
+That coding figure was 77 seconds until the prompt was given a hard length
+cap. Latency here is almost entirely output length: the model is not thinking
+for longer, it is writing more. An answer with an alternatives section and an
+aside about what the interviewer might prefer is not a better answer to read
+mid-interview, and it costs a minute.
 
 Every `claude -p` call carries roughly 29,000 tokens of the CLI's own preamble
 regardless of how small your question is: $0.0254 on a cold cache, $0.0033 once
@@ -281,6 +306,12 @@ design: the alternative is the transcriber stalling behind it and losing audio.
 for the subtitled video it was trained on — "I'll see you next time" appeared in
 90 seconds of an empty room. Known artefacts are filtered and transcripts whose
 audio was never loud enough to be speech are dropped, but some get through.
+Both kinds of drop now say so in the panel rather than only in a debug log.
+
+**You spoke and nothing appeared.** Watch the `you` meter. If it moves and says
+`SPEECH`, jay heard you and the fault is downstream — look for a
+`too quiet to trust` notice. If it says `NO INPUT`, the capture thread has
+stopped. If it says `OFF`, that channel was never started, so check `--source`.
 
 **Jargon mangled.** `--model small` is the default and the best wired up.
 
@@ -292,10 +323,14 @@ Working and measured: capture on both channels, VAD, transcription, the gate,
 context selection, every mode, screen capture, session archiving, cost and
 latency. Nine test suites.
 
-Not yet exercised by a human: **the button has never been pressed**, and
-**nobody has looked at the panel**. There has been no forty-minute run, and jay
-has never heard a real human voice — every word it has transcribed came from
-macOS `say` or a speaker playing into a microphone.
+The button has been pressed, twice, and did the right thing both times: looked
+at an empty screen, said there was no problem to work on, and declined to
+invent one.
+
+Still not exercised: **a real conversation**. There has been no forty-minute
+run and no session with two people in it. jay has never transcribed a live
+human voice — every word it has handled came from macOS `say` or a speaker
+played into a microphone.
 
 ---
 

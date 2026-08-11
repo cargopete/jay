@@ -47,14 +47,22 @@ pub struct Utterance {
     pub samples: Vec<f32>,
     /// When the first frame of this utterance was captured.
     pub started_at: Instant,
+    /// Loudest frame the VAD actually called speech.
+    ///
+    /// This is the honest measure of "was anything really said", and [`rms`]
+    /// is not. Every utterance carries about 250 ms of pre-roll and 600 ms of
+    /// trailing silence by construction, so a mean over the whole buffer is a
+    /// mean over a good deal of room tone: a perfectly clear short sentence
+    /// can be diluted below a threshold a long one clears easily. A caller
+    /// that discards quiet audio must judge it on this.
+    pub speech_peak: f32,
 }
 
 impl Utterance {
-    /// Root-mean-square amplitude over the whole utterance.
+    /// Root-mean-square amplitude over the whole utterance, silence included.
     ///
-    /// The cheapest defence against whisper's habit of inventing fluent
-    /// sentences out of near-silence: a caller can distrust a transcript whose
-    /// audio was never loud enough to be speech.
+    /// Useful as a level reading. Not useful as a threshold — see
+    /// [`speech_peak`](Self::speech_peak), which is what to gate on.
     pub fn rms(&self) -> f32 {
         if self.samples.is_empty() {
             return 0.0;
@@ -81,6 +89,8 @@ pub struct SpeechSegmenter {
     current: Vec<f32>,
     pre_roll: VecDeque<Vec<f32>>,
     started_at: Option<Instant>,
+    /// Loudest frame the VAD has called speech in the utterance being built.
+    speech_peak: f32,
 }
 
 impl SpeechSegmenter {
@@ -100,6 +110,7 @@ impl SpeechSegmenter {
             current: Vec::new(),
             pre_roll: VecDeque::with_capacity(PRE_ROLL_FRAMES),
             started_at: None,
+            speech_peak: 0.0,
         })
     }
 
@@ -110,6 +121,12 @@ impl SpeechSegmenter {
 
         let probability = self.vad.predict(frame.samples.iter().copied());
         let is_speech = probability >= SPEECH_THRESHOLD;
+
+        // Track the peak over speech frames only, so the level survives the
+        // pre-roll and trailing silence that bracket every utterance.
+        if is_speech {
+            self.speech_peak = self.speech_peak.max(frame.rms());
+        }
 
         if self.in_speech {
             self.current.extend_from_slice(&frame.samples);
@@ -135,6 +152,9 @@ impl SpeechSegmenter {
                 self.speech_run += 1;
             } else {
                 self.speech_run = 0;
+                // A stray speech frame that never became an utterance must not
+                // leave its level behind to flatter the next one.
+                self.speech_peak = 0.0;
             }
 
             self.pre_roll.push_back(frame.samples.clone());
@@ -179,6 +199,7 @@ impl SpeechSegmenter {
         self.pre_roll.clear();
 
         let samples = std::mem::take(&mut self.current);
+        let speech_peak = std::mem::take(&mut self.speech_peak);
         let started_at = self.started_at.take()?;
         if samples.is_empty() {
             return None;
@@ -188,6 +209,7 @@ impl SpeechSegmenter {
             channel: self.channel,
             samples,
             started_at,
+            speech_peak,
         })
     }
 

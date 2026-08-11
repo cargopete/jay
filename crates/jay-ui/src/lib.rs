@@ -23,6 +23,13 @@ pub enum Kind {
     /// Something jay is offering. Drawn distinctly, because you should never
     /// have to wonder whether you are reading a person or a machine.
     Suggestion,
+    /// An answer still being written. Replaces the last partial rather than
+    /// accumulating, and is discarded the moment the finished one lands.
+    ///
+    /// The whole answer takes about fourteen seconds and the first words take
+    /// about five. Showing them at five is the difference between an answer
+    /// you can still use and one that arrives after the moment.
+    Partial,
     /// Housekeeping: budget spent, a gate declining, an error.
     Notice,
 }
@@ -64,6 +71,17 @@ impl Line {
         }
     }
 
+    /// An answer in progress. `text` is the whole of it so far.
+    pub fn partial(text: impl Into<String>) -> Self {
+        Self {
+            speaker: "jay".into(),
+            text: text.into(),
+            lag: std::time::Duration::ZERO,
+            kind: Kind::Partial,
+            at: std::time::Duration::ZERO,
+        }
+    }
+
     pub fn notice(text: impl Into<String>) -> Self {
         Self {
             speaker: "jay".into(),
@@ -98,11 +116,12 @@ pub fn run(
     rx: Receiver<Line>,
     requests: crossbeam_channel::Sender<Request>,
     model_name: String,
+    levels: std::sync::Arc<jay_audio::Levels>,
 ) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("jay")
-            .with_inner_size([600.0, 460.0])
+            .with_inner_size([600.0, 500.0])
             .with_min_inner_size([360.0, 200.0])
             .with_transparent(true)
             .with_decorations(false)
@@ -113,8 +132,20 @@ pub fn run(
     eframe::run_native(
         "jay",
         options,
-        Box::new(move |cc| Ok(Box::new(Overlay::new(cc, rx, requests, model_name)))),
+        Box::new(move |cc| Ok(Box::new(Overlay::new(cc, rx, requests, model_name, levels)))),
     )
+}
+
+/// What one channel's meter is doing, resolved fresh each repaint.
+struct Reading {
+    /// Meter travel, 0 to 1, already decayed for display.
+    fraction: f32,
+    /// Frames are still arriving. False means the capture thread has stopped
+    /// or was never running, which is a different fault from a quiet room and
+    /// must not be drawn the same way.
+    running: bool,
+    /// The VAD currently has this channel open.
+    speaking: bool,
 }
 
 struct Overlay {
@@ -130,6 +161,14 @@ struct Overlay {
     /// When speech last arrived. Powers the intake lamp, which reports
     /// liveness and is therefore lit by the thing it reports on.
     last_signal: Option<Instant>,
+    /// The answer currently being written, if one is.
+    partial: Option<String>,
+    /// Live input levels, written by the capture loop.
+    levels: std::sync::Arc<jay_audio::Levels>,
+    /// Displayed needle position per channel, and the frame count it was taken
+    /// at. Held so the meter can fall smoothly rather than flickering at the
+    /// frame rate, and so a stalled stream can be told from a silent one.
+    shown: [(f32, u64); 2],
 }
 
 impl Overlay {
@@ -138,6 +177,7 @@ impl Overlay {
         rx: Receiver<Line>,
         requests: crossbeam_channel::Sender<Request>,
         model_name: String,
+        levels: std::sync::Arc<jay_audio::Levels>,
     ) -> Self {
         // Dark, translucent, and low contrast enough to sit over a terminal
         // without becoming the thing you look at.
@@ -164,7 +204,94 @@ impl Overlay {
             started: Instant::now(),
             waiting_since: None,
             last_signal: None,
+            partial: None,
+            levels,
+            shown: [(0.0, 0); 2],
         }
+    }
+
+    /// Read one channel's meter, decaying the displayed value toward it.
+    ///
+    /// The fall is deliberately slower than the rise: a meter that drops
+    /// instantly to zero between syllables reads as broken, and the thing being
+    /// answered here is "is it hearing me", which wants the envelope of speech
+    /// rather than the instantaneous sample.
+    fn reading(&mut self, channel: jay_audio::Channel, slot: usize) -> Reading {
+        let (rms, frames, speaking) = self.levels.meter(channel).read();
+        let target = jay_audio::meter_fraction(rms);
+        let (previous, seen_at) = self.shown[slot];
+        let running = frames > seen_at;
+        // Nothing arriving: fall to nothing. Do not hold the last value, which
+        // would leave a dead stream showing a healthy bar.
+        let fraction = if running {
+            target.max(previous - 0.06)
+        } else {
+            (previous - 0.06).max(0.0)
+        };
+        self.shown[slot] = (fraction, frames);
+        Reading {
+            fraction,
+            running,
+            speaking,
+        }
+    }
+
+    /// One channel's input meter: a track cut into the plate, with a fill.
+    ///
+    /// A gauge here earns its place by the ornament test — it is bound to the
+    /// actual RMS of the actual samples, and it is the only thing in the panel
+    /// that reports on the ten seconds between a sound arriving and a sentence
+    /// appearing.
+    fn draw_meter(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        channel: jay_audio::Channel,
+        slot: usize,
+    ) {
+        let reading = self.reading(channel, slot);
+        // A channel that has never delivered a single frame was never switched
+        // on. That is not a fault, and must not be drawn as one.
+        let ever_ran = self.shown[slot].1 > 0;
+        let colour = match channel {
+            jay_audio::Channel::Mic => BRASS,
+            jay_audio::Channel::System => COPPER,
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(stencil(label));
+
+            let width = (ui.available_width() - 78.0).max(60.0);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, INSET);
+            ui.painter().rect_stroke(
+                rect,
+                2.0,
+                egui::Stroke::new(1.0, SEAM),
+                egui::StrokeKind::Inside,
+            );
+            if reading.fraction > 0.0 {
+                let mut fill = rect.shrink(1.5);
+                fill.set_width((rect.width() - 3.0) * reading.fraction);
+                ui.painter().rect_filled(fill, 1.0, colour);
+            }
+
+            // The word beside the meter is the diagnosis, and the three states
+            // are genuinely different faults.
+            let (word, tint) = match (ever_ran, reading.running, reading.speaking) {
+                (false, _, _) => ("off", INK_FAINT),
+                (true, false, _) => ("no input", EMBER),
+                (true, true, true) => ("speech", VERDIGRIS),
+                (true, true, false) => ("quiet", INK_FAINT),
+            };
+            ui.label(
+                egui::RichText::new(word.to_uppercase())
+                    .size(LABEL)
+                    .family(egui::FontFamily::Monospace)
+                    .color(tint),
+            );
+        });
     }
 }
 
@@ -175,6 +302,8 @@ impl Overlay {
 
 /// Panel ground. `--iron`: this is a plate, not the page.
 const IRON: egui::Color32 = egui::Color32::from_rgb(0x1c, 0x18, 0x13);
+/// `--inset`: below the plate. Meter tracks are channels cut into it.
+const INSET: egui::Color32 = egui::Color32::from_rgb(0x0a, 0x08, 0x04);
 /// `--iron-2`: header strips and the compartment a reading sits in.
 const IRON_2: egui::Color32 = egui::Color32::from_rgb(0x24, 0x1f, 0x18);
 /// `--seam`: hairlines.
@@ -248,9 +377,16 @@ impl eframe::App for Overlay {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         for line in self.rx.try_iter() {
+            // A partial replaces the one before it and is never retained: the
+            // finished suggestion is the thing that goes in the transcript.
+            if line.kind == Kind::Partial {
+                self.partial = Some(line.text);
+                continue;
+            }
             // A suggestion arriving is what clears the waiting state.
             if line.kind == Kind::Suggestion {
                 self.waiting_since = None;
+                self.partial = None;
             }
             if line.kind == Kind::Transcript {
                 self.last_signal = Some(Instant::now());
@@ -362,11 +498,22 @@ impl eframe::App for Overlay {
 
             ui.separator();
 
+            // Intake meters. These sit above the transcript because they
+            // answer the question the transcript cannot: an empty transcript
+            // means either nobody spoke or nothing was heard, and until there
+            // was a meter here those two looked identical.
+            ui.add_space(2.0);
+            self.draw_meter(ui, "you", jay_audio::Channel::Mic, 0);
+            ui.add_space(3.0);
+            self.draw_meter(ui, "them", jay_audio::Channel::System, 1);
+            ui.add_space(4.0);
+            ui.separator();
+
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if self.lines.is_empty() {
+                    if self.lines.is_empty() && self.partial.is_none() {
                         // Absent is absent. Never a zero, never a dash that
                         // could pass for a reading.
                         ui.add_space(8.0);
@@ -383,6 +530,7 @@ impl eframe::App for Overlay {
                                 ui.label(stencil(&line.text));
                                 ui.add_space(2.0);
                             }
+                            Kind::Partial => {} // never retained
                             Kind::Suggestion => {
                                 // A reading, in its own labelled compartment.
                                 // Data lives inside a compartment here, the way
@@ -435,6 +583,36 @@ impl eframe::App for Overlay {
                                 ui.add_space(5.0);
                             }
                         }
+                    }
+
+                    // The answer being written, below everything said so far.
+                    if let Some(partial) = &self.partial {
+                        egui::Frame::new()
+                            .fill(IRON_2)
+                            .stroke(egui::Stroke::new(1.0, SEAM))
+                            .inner_margin(10.0)
+                            .corner_radius(2.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Ember: hot iron is what working looks
+                                    // like, and this reading is not finished.
+                                    ui.label(
+                                        egui::RichText::new("READING")
+                                            .size(HEADING)
+                                            .strong()
+                                            .color(EMBER),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| ui.label(stencil("writing")),
+                                    );
+                                });
+                                ui.add_space(3.0);
+                                ui.label(
+                                    egui::RichText::new(partial).size(BODY).color(INK),
+                                );
+                            });
+                        ui.add_space(6.0);
                     }
                 });
         }
