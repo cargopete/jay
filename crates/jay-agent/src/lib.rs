@@ -33,11 +33,23 @@ pub enum Depth {
     /// The worked answer: real compiling code, a real component diagram.
     #[default]
     Full,
+
     /// A nudge: the approach, the complexity, the thing you are about to miss.
     ///
     /// Under forty words for coding, sixty for design, no implementation. Use
     /// it when you want to solve it yourself and are stuck rather than lost.
     Hint,
+}
+
+impl Depth {
+    pub const ALL: [Depth; 2] = [Depth::Full, Depth::Hint];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Depth::Full => "answer",
+            Depth::Hint => "nudge",
+        }
+    }
 }
 
 /// What jay is being used for. Changes what it is asked, not what it can see.
@@ -74,6 +86,26 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Every mode, in the order a mock loop runs them.
+    pub const ALL: [Mode; 5] = [
+        Mode::Coding,
+        Mode::SystemDesign,
+        Mode::Rehearsal,
+        Mode::Pairing,
+        Mode::Dev,
+    ];
+
+    /// Short enough for a switch on a small panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Coding => "code",
+            Mode::SystemDesign => "design",
+            Mode::Rehearsal => "debrief",
+            Mode::Pairing => "pair",
+            Mode::Dev => "dev",
+        }
+    }
+
     /// Appended to Claude Code's own system prompt for this mode.
     ///
     /// Kept short deliberately. Every token here is paid on every call, and
@@ -217,6 +249,48 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panel draws one switch per entry in `ALL` and sends the mode back.
+    /// If a mode were ever added without being listed, it would simply be
+    /// unreachable from the panel, silently.
+    #[test]
+    fn every_mode_is_reachable_from_the_switch_bank() {
+        for mode in [
+            Mode::Coding,
+            Mode::SystemDesign,
+            Mode::Rehearsal,
+            Mode::Pairing,
+            Mode::Dev,
+        ] {
+            assert!(Mode::ALL.contains(&mode), "{mode:?} is not on the panel");
+        }
+        let mut labels: Vec<_> = Mode::ALL.iter().map(|m| m.label()).collect();
+        labels.sort_unstable();
+        let count = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), count, "two switches carry the same label");
+    }
+
+    /// Throwing a switch spawns a new process, so the pair must actually
+    /// change what that process is told. If two positions produced the same
+    /// system prompt, the switch would cost 4.7 seconds and buy nothing.
+    #[test]
+    fn each_switch_position_asks_for_something_different() {
+        let mut seen = std::collections::HashSet::new();
+        for mode in Mode::ALL {
+            for depth in Depth::ALL {
+                seen.insert(mode.system_prompt(depth));
+            }
+        }
+        // Pairing and Dev share the coding hint, deliberately: a nudge is a
+        // nudge. Everything else must be distinct.
+        assert!(
+            seen.len() >= 7,
+            "only {} distinct prompts across {} switch positions",
+            seen.len(),
+            Mode::ALL.len() * Depth::ALL.len()
+        );
+    }
 
     #[test]
     fn every_mode_has_a_distinct_system_prompt() {

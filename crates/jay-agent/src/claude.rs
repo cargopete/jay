@@ -606,13 +606,16 @@ impl Drop for Session {
 }
 
 impl Session {
-    pub fn new(claude: &Claude, mode: Mode) -> Self {
+    /// A session is defined by its mode and depth together, because both are
+    /// baked into the system prompt and the system prompt is fixed when the
+    /// process spawns. Changing either means a new process.
+    pub fn new(claude: &Claude, mode: Mode, depth: crate::Depth) -> Self {
         Self {
             binary: claude.binary.clone(),
             model: claude.model.clone(),
-            system_prompt: format!("{}{}", mode.system_prompt(claude.depth), crate::LATE_ARRIVAL),
+            system_prompt: format!("{}{}", mode.system_prompt(depth), crate::LATE_ARRIVAL),
             mode,
-            depth: claude.depth,
+            depth,
             brief: claude.brief.clone(),
             brief_sent: false,
             live: None,
@@ -851,8 +854,8 @@ mod session_tests {
     #[test]
     #[ignore = "spends money and needs the claude CLI signed in"]
     fn a_session_reuses_its_process_and_the_second_ask_is_faster() {
-        let claude = Claude::new(DEFAULT_MODEL).with_depth(crate::Depth::Hint);
-        let mut session = Session::new(&claude, Mode::Pairing);
+        let claude = Claude::new(DEFAULT_MODEL);
+        let mut session = Session::new(&claude, Mode::Pairing, crate::Depth::Hint);
         let mut ignore = |_: &str| {};
 
         let first = session

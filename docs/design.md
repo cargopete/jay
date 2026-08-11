@@ -486,3 +486,34 @@ being right.
 Every question carrying a screenshot now says which part of the image is jay's
 own output. Capturing only the focused window would be stronger and is the
 better fix if this proves insufficient; a sentence is what it costs today.
+
+## The switches, and why they cost 4.7 seconds
+
+A mock loop is an algorithmic round followed by a design round, and those want
+different prompts. Before the switch bank the only way between them was to quit
+jay and relaunch it with a different `--mode` — which means quitting *during an
+interview*, losing the transcript that had just been built up, and fumbling with
+a terminal while somebody waits.
+
+The system prompt is baked in when the CLI process spawns, so a session is
+defined by the pair (mode, depth) and changing either means a new process. The
+next press therefore pays the ~4.7 second startup again. That is the right
+trade: it is paid once per round rather than once per question, and the thing
+it buys is not having to leave the interview.
+
+Two details that matter. The switch position is carried **on the question**
+rather than read from shared state when the answer comes back, so moving a
+switch while an answer is in flight cannot retroactively change what that
+answer was asked for. And the switches light immediately on click rather than
+when the pipeline acknowledges them, because a control that does not move when
+you press it gets pressed again.
+
+They are drawn as switch positions rather than buttons — one lit in brass,
+the rest faint — because that is what they are. Only one position of each bank
+can be thrown at a time, and a button is a thing you press to make something
+happen rather than a state you leave the machine in.
+
+Two tests hold this together: every mode must appear in `Mode::ALL`, or it
+would simply be unreachable from the panel and nothing would say so; and the
+switch positions must produce genuinely different system prompts, or throwing
+one would cost 4.7 seconds and buy nothing.

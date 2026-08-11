@@ -2073,6 +2073,7 @@ dependencies = [
  "crossbeam-channel",
  "eframe",
  "egui",
+ "jay-agent",
  "jay-audio",
 ]
 

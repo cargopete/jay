@@ -109,6 +109,15 @@ pub enum Request {
     /// that was not asked for, and the moment of the click is exactly the
     /// moment the screen shows the thing being discussed.
     Suggest,
+    /// Change what kind of answer the lever gives.
+    ///
+    /// A mock loop is an algorithmic round followed by a design round, and
+    /// before this the only way between them was to quit and relaunch — which
+    /// means quitting *during an interview*, losing the transcript that had
+    /// just been built up, and fumbling a terminal while someone waits.
+    SetMode(jay_agent::Mode),
+    /// Switch between the worked answer and a nudge.
+    SetDepth(jay_agent::Depth),
 }
 
 /// Run the overlay. Blocks until the window is closed.
@@ -116,6 +125,8 @@ pub fn run(
     rx: Receiver<Line>,
     requests: crossbeam_channel::Sender<Request>,
     model_name: String,
+    mode: jay_agent::Mode,
+    depth: jay_agent::Depth,
     levels: std::sync::Arc<jay_audio::Levels>,
     // `expected` is which channels the session asked for, as `[mic, system]`.
     // Without it the panel cannot tell a channel that was never switched on
@@ -139,7 +150,9 @@ pub fn run(
         "jay",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(Overlay::new(cc, rx, requests, model_name, levels, expected)))
+            Ok(Box::new(Overlay::new(
+                cc, rx, requests, model_name, mode, depth, levels, expected,
+            )))
         }),
     )
 }
@@ -161,6 +174,11 @@ struct Overlay {
     requests: crossbeam_channel::Sender<Request>,
     lines: VecDeque<Line>,
     model_name: String,
+    /// What the lever will give, and how much of it. Held here so the switches
+    /// light correctly the instant they are thrown rather than after the
+    /// pipeline has acknowledged them.
+    mode: jay_agent::Mode,
+    depth: jay_agent::Depth,
     started: Instant,
     /// Set when a suggestion is in flight, so the button can say so. A
     /// suggestion takes twelve seconds at best; a button that looks idle for
@@ -187,6 +205,8 @@ impl Overlay {
         rx: Receiver<Line>,
         requests: crossbeam_channel::Sender<Request>,
         model_name: String,
+        mode: jay_agent::Mode,
+        depth: jay_agent::Depth,
         levels: std::sync::Arc<jay_audio::Levels>,
         expected: [bool; 2],
     ) -> Self {
@@ -212,6 +232,8 @@ impl Overlay {
             requests,
             lines: VecDeque::with_capacity(MAX_LINES),
             model_name,
+            mode,
+            depth,
             started: Instant::now(),
             waiting_since: None,
             last_signal: None,
@@ -246,6 +268,51 @@ impl Overlay {
             running,
             speaking,
         }
+    }
+
+    /// One switch: a word that lights when it is the one in use.
+    ///
+    /// Deliberately not a button. A button is a thing you press to make
+    /// something happen; these are positions of a switch, and only one of each
+    /// bank can be thrown at a time. Lit brass is the position it is in.
+    fn switch(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
+        let text = egui::RichText::new(label.to_uppercase())
+            .size(LABEL)
+            .family(egui::FontFamily::Monospace)
+            .color(if active { BRASS_HI } else { INK_FAINT });
+        let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        if response.hovered() && !active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        response.clicked() && !active
+    }
+
+    /// The switch bank: which round the lever is answering for, and whether it
+    /// hands over the answer or a nudge.
+    fn draw_switches(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(stencil("round"));
+            for mode in jay_agent::Mode::ALL {
+                if Self::switch(ui, mode.label(), mode == self.mode)
+                    && self.requests.send(Request::SetMode(mode)).is_ok()
+                {
+                    self.mode = mode;
+                }
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for depth in jay_agent::Depth::ALL.into_iter().rev() {
+                    if Self::switch(ui, depth.label(), depth == self.depth)
+                        && self.requests.send(Request::SetDepth(depth)).is_ok()
+                    {
+                        self.depth = depth;
+                    }
+                }
+                ui.label(stencil("gives"));
+            });
+        });
     }
 
     /// One channel's input meter: a track cut into the plate, with a fill.
@@ -543,6 +610,10 @@ impl eframe::App for Overlay {
             self.draw_meter(ui, "you", jay_audio::Channel::Mic, 0);
             ui.add_space(3.0);
             self.draw_meter(ui, "them", jay_audio::Channel::System, 1);
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(3.0);
+            self.draw_switches(ui);
             ui.add_space(4.0);
             ui.separator();
 

@@ -565,6 +565,8 @@ fn transcribe(
         line_rx,
         request_tx,
         model.to_string(),
+        assist.mode,
+        jay_agent::Depth::default(),
         levels,
         [source.uses_mic(), source.uses_system()],
     )
@@ -632,6 +634,13 @@ struct Assist {
 struct Ask {
     question: String,
     context: Vec<String>,
+    /// What the switches said at the moment the lever was thrown.
+    ///
+    /// Carried on the question rather than read from shared state, so a mode
+    /// changed while an answer is in flight cannot retroactively alter what
+    /// that answer was asked for.
+    mode: jay_agent::Mode,
+    depth: jay_agent::Depth,
     /// Present only for hand-asked requests, where the screen at the moment of
     /// the click is very likely the thing being discussed.
     screenshot: Option<std::path::PathBuf>,
@@ -655,14 +664,27 @@ fn spawn_assistant(
             // One process for the whole session. The first press pays the
             // ~4.7s spawn-and-preamble toll; every press after it pays about
             // 1.2s, and each one is asked of something that heard the last.
-            let mut session = jay_agent::claude::Session::new(&claude, assist.mode);
+            let mut session =
+                jay_agent::claude::Session::new(&claude, assist.mode, jay_agent::Depth::default());
+            let mut running = (assist.mode, jay_agent::Depth::default());
             let mut spent = 0.0f64;
             for Ask {
                 question,
                 context,
+                mode,
+                depth,
                 screenshot,
             } in questions
             {
+                // The system prompt is fixed when the process spawns, so a
+                // change of round means a new process. That costs the ~4.7s
+                // startup again on the next press, which is the correct price
+                // for not having to quit jay in the middle of an interview.
+                if running != (mode, depth) {
+                    tracing::info!(?mode, ?depth, "switches moved; new session");
+                    session = jay_agent::claude::Session::new(&claude, mode, depth);
+                    running = (mode, depth);
+                }
                 if assist.budget_usd.is_some_and(|cap| spent >= cap) {
                     // Said once, then the loop keeps draining so the sender
                     // never blocks on a full channel.
@@ -817,13 +839,35 @@ fn run_pipeline(
     // spent that was not asked for, and the screen at the moment of the click
     // is almost always the thing being discussed.
     if let (Some(tx), Some(rx)) = (question_tx.clone(), requests) {
+        let settings_mode = settings.mode;
         let history = std::sync::Arc::clone(&history);
         let problem = std::sync::Arc::clone(&problem);
         let lines = lines.clone();
         std::thread::Builder::new()
             .name("jay-hand-ask".into())
             .spawn(move || {
-                for jay_ui::Request::Suggest in rx {
+                let mut mode = settings_mode;
+                let mut depth = jay_agent::Depth::default();
+                for request in rx {
+                    match request {
+                        jay_ui::Request::SetMode(next) => {
+                            mode = next;
+                            let _ = lines.send(jay_ui::Line::notice(format!(
+                                "round: {}",
+                                next.label()
+                            )));
+                            continue;
+                        }
+                        jay_ui::Request::SetDepth(next) => {
+                            depth = next;
+                            let _ = lines.send(jay_ui::Line::notice(format!(
+                                "gives: {}",
+                                next.label()
+                            )));
+                            continue;
+                        }
+                        jay_ui::Request::Suggest => {}
+                    }
                     let context = with_problem(&problem, &history);
 
                     let screenshot = match jay_agent::screen::capture(
@@ -870,6 +914,8 @@ fn run_pipeline(
                     if let Err(crossbeam_channel::TrySendError::Full(_)) = tx.try_send(Ask {
                         question,
                         context,
+                        mode,
+                        depth,
                         screenshot,
                     }) {
                         let _ = lines.send(jay_ui::Line::notice(

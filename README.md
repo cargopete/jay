@@ -88,6 +88,13 @@ open -n -a ~/Projects/jay/target/release/jay.app --args \
 A small dark panel appears above everything, draggable by its header. Talk.
 Press **ask jay** when you want the answer. Close it with **×**.
 
+Under the meters is a switch bank. **ROUND** picks what the lever answers for —
+`CODE`, `DESIGN`, `DEBRIEF`, `PAIR`, `DEV` — and **GIVES** picks `ANSWER` or
+`NUDGE`. Throwing either starts a fresh Claude process, so the next press pays
+the 4.7 second startup again; that is the price of not quitting jay in the
+middle of an interview, which is what changing rounds used to cost. `--mode`
+still sets where it starts.
+
 > Use the absolute path. `open -n -a "$PWD/..."` only works if you are already in
 > the repository, and fails confusingly if you are not.
 
@@ -137,7 +144,7 @@ jay transcribe --overlay --source both --mode coding \
 | --- | --- |
 | `--source` | `mic`, `system`, or `both`. `both` lets jay tell you apart. |
 | `--overlay` | Floating panel instead of terminal output. |
-| `--mode` | What kind of answer the button gives. See below. |
+| `--mode` | Which round to start in. Switchable in the panel afterwards. |
 | `--brief` | Standing context for the session. |
 | `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
@@ -169,9 +176,10 @@ The two interview types want different things, and one mode cannot serve both.
 | `pairing` | Working with a colleague | Concrete, opinionated, short. Will happily give you SQL. |
 | `dev` | A test went red | What is likely responsible and the first thing worth checking. |
 
-Add **`--hint`** to any of them to be nudged instead of answered: the approach,
-the complexity, or the thing you are about to miss, in under forty words with no
-implementation. Use it when you want the rep rather than the answer.
+Set **GIVES** to `NUDGE` in the panel, or add **`--hint`** to `jay ask`, to be
+nudged instead of answered: the approach, the complexity, or the thing you are
+about to miss, in under forty words with no implementation. Use it when you
+want the rep rather than the answer.
 
 Hints are also about three times faster — 5.4s against 17.9s on the same
 question — because latency is dominated by how much gets generated rather than
