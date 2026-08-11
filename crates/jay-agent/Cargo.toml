@@ -1,0 +1,13 @@
+[package]
+name = "jay-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror.workspace = true
+tracing.workspace = true

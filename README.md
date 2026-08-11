@@ -42,9 +42,10 @@ Early. Stage 1 is capture, transcription and an overlay.
 | Silero VAD segmentation | Working, weights compiled in |
 | Local STT (whisper.cpp via Metal) | Working, `base.en` at ~40x real time |
 | Live mic transcription | Wired, not yet tested against a real voice |
-| System audio capture (CoreAudio process taps) | Not started |
-| Transparent overlay | Not started |
-| Agent loop and suggestions | Not started |
+| Transparent overlay | Wired to the live transcript; visual design unreviewed |
+| Suggestion gate (rules, free) | Working |
+| Suggestions via the Max subscription | Working, measured |
+| System audio capture (CoreAudio process taps) | Runs, returns silence — see design notes |
 
 ## Layout
 
@@ -63,7 +64,13 @@ cargo run -p jay -- devices              # what inputs can jay see
 cargo run -p jay -- listen --seconds 6   # capture smoke test with levels
 cargo run -p jay -- transcribe           # live transcription from the mic
 cargo run -p jay -- file talk.wav        # transcribe a 16 kHz mono WAV
+cargo run -p jay -- transcribe --overlay # live transcript in a floating panel
+cargo run -p jay -- ask "why is this failing?" --mode dev
 ```
+
+`ask` runs the gate first, so it declines to spend anything on an utterance
+that isn't a question. When it does escalate it reports the model, the latency
+and the cost, because those numbers are what decide whether the idea works.
 
 The first run of either transcribe command downloads whisper weights
 (`base.en`, 142 MB) into the platform cache directory.

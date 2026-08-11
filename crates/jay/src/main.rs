@@ -42,6 +42,27 @@ impl Source {
     }
 }
 
+/// Which kind of help to ask for.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AskMode {
+    /// Mock interview practice: points to think with, and what you missed.
+    Rehearsal,
+    /// Live pairing: concrete, short, opinionated.
+    Pairing,
+    /// Something went wrong: what is likely responsible and what to check.
+    Dev,
+}
+
+impl From<AskMode> for jay_agent::Mode {
+    fn from(mode: AskMode) -> Self {
+        match mode {
+            AskMode::Rehearsal => jay_agent::Mode::Rehearsal,
+            AskMode::Pairing => jay_agent::Mode::Pairing,
+            AskMode::Dev => jay_agent::Mode::Dev,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List the audio input devices jay can see.
@@ -60,6 +81,20 @@ enum Command {
         /// How long to listen for, in seconds.
         #[arg(short, long, default_value_t = 10)]
         seconds: u64,
+    },
+    /// Ask jay for help with one question, without the audio pipeline.
+    ///
+    /// The quickest way to see what a suggestion actually looks like, and what
+    /// it costs, before wiring it to a microphone.
+    Ask {
+        /// The question, as it would have been heard.
+        question: String,
+        /// Which kind of help to ask for.
+        #[arg(short, long, value_enum, default_value_t = AskMode::Rehearsal)]
+        mode: AskMode,
+        /// Model for the reasoning step.
+        #[arg(long, default_value = jay_agent::claude::DEFAULT_MODEL)]
+        model: String,
     },
     /// Transcribe a 16 kHz mono WAV file.
     ///
@@ -86,6 +121,9 @@ enum Command {
         /// How long to run for, in seconds. Zero runs until interrupted.
         #[arg(short, long, default_value_t = 60)]
         seconds: u64,
+        /// Show the transcript in a floating overlay instead of the terminal.
+        #[arg(long)]
+        overlay: bool,
     },
 }
 
@@ -110,8 +148,14 @@ fn main() -> Result<()> {
             device,
             model,
             seconds,
-        } => transcribe(source, device.as_deref(), model, seconds),
+            overlay,
+        } => transcribe(source, device.map(Into::into), model, seconds, overlay),
         Command::File { path, model } => transcribe_file(&path, model),
+        Command::Ask {
+            question,
+            mode,
+            model,
+        } => ask(&question, mode.into(), &model),
     }
 }
 
@@ -197,7 +241,40 @@ fn transcribe_file(path: &std::path::Path, model: Model) -> Result<()> {
 /// Whisper runs on its own thread. An utterance can be twenty seconds long and
 /// take a second or two to decode, and blocking the capture loop on that would
 /// back the frame channel up and start dropping audio.
-fn transcribe(source: Source, device: Option<&str>, model: Model, seconds: u64) -> Result<()> {
+fn transcribe(
+    source: Source,
+    device: Option<String>,
+    model: Model,
+    seconds: u64,
+    overlay: bool,
+) -> Result<()> {
+    if !overlay {
+        return run_pipeline(source, device.as_deref(), model, seconds, None);
+    }
+
+    let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
+
+    // The whole pipeline moves to a background thread: on macOS the windowing
+    // event loop insists on the main thread and will not negotiate.
+    std::thread::Builder::new()
+        .name("jay-pipeline".into())
+        .spawn(move || {
+            if let Err(e) = run_pipeline(source, device.as_deref(), model, seconds, Some(line_tx)) {
+                tracing::error!(%e, "capture pipeline stopped");
+            }
+        })
+        .context("spawning the capture pipeline")?;
+
+    jay_ui::run(line_rx, model.to_string()).map_err(|e| anyhow::anyhow!("overlay: {e}"))
+}
+
+fn run_pipeline(
+    source: Source,
+    device: Option<&str>,
+    model: Model,
+    seconds: u64,
+    lines: Option<crossbeam_channel::Sender<jay_ui::Line>>,
+) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(512);
@@ -243,14 +320,29 @@ fn transcribe(source: Source, device: Option<&str>, model: Model, seconds: u64) 
                 // Lag measured from the first sample of the utterance, which
                 // is the number a listener would actually notice.
                 let lag = utterance.started_at.elapsed();
-                println!(
-                    "[{}] {}\n      {:.1}s speech, {:.0}ms inference, {:.1}s behind live",
-                    utterance.channel.label(),
-                    result.text,
-                    spoken.as_secs_f32(),
-                    result.inference.as_secs_f32() * 1000.0,
-                    lag.as_secs_f32(),
-                );
+
+                match &lines {
+                    Some(tx) => {
+                        if tx
+                            .send(jay_ui::Line {
+                                speaker: utterance.channel.label().to_string(),
+                                text: result.text,
+                                lag,
+                            })
+                            .is_err()
+                        {
+                            return; // the overlay was closed
+                        }
+                    }
+                    None => println!(
+                        "[{}] {}\n      {:.1}s speech, {:.0}ms inference, {:.1}s behind live",
+                        utterance.channel.label(),
+                        result.text,
+                        spoken.as_secs_f32(),
+                        result.inference.as_secs_f32() * 1000.0,
+                        lag.as_secs_f32(),
+                    ),
+                }
             }
         })
         .context("spawning the transcription thread")?;
@@ -300,6 +392,36 @@ fn transcribe(source: Source, device: Option<&str>, model: Model, seconds: u64) 
             capture.dropped_samples()
         );
     }
+    Ok(())
+}
+
+/// One-shot suggestion, no audio involved.
+fn ask(question: &str, mode: jay_agent::Mode, model: &str) -> Result<()> {
+    // The gate runs first even here, so the thing being demonstrated is the
+    // actual decision path and not a shortcut around it.
+    let Some(trigger) = jay_agent::gate::classify(question) else {
+        println!("the gate declined to escalate this, so it costs nothing.");
+        println!("it only wakes on questions, wake phrases, or events.");
+        return Ok(());
+    };
+
+    let asked = match &trigger {
+        jay_agent::gate::Trigger::Question(q)
+        | jay_agent::gate::Trigger::Addressed(q)
+        | jay_agent::gate::Trigger::Event(q) => q.as_str(),
+    };
+
+    let suggestion = jay_agent::claude::Claude::new(model)
+        .suggest(mode, asked, &[])
+        .context("asking claude")?;
+
+    println!("{}\n", suggestion.text);
+    println!(
+        "— {} · {:.1}s · ${:.4}",
+        suggestion.model,
+        suggestion.latency.as_secs_f32(),
+        suggestion.cost_usd
+    );
     Ok(())
 }
 

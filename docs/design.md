@@ -123,6 +123,48 @@ gate escalates. Deterministic triggers (a red test, a stack trace, a failed CI
 run) cost nothing to detect and are the highest-signal events available. Those
 come first, before any clever conversational judgment.
 
+## What a suggestion actually costs and how long it takes (measured)
+
+All figures from this machine, driving `claude -p` on the Max subscription.
+
+A one-word reply to a trivial prompt:
+
+| Cache state | Cost |
+| --- | --- |
+| Cold | $0.0254 |
+| Warming | $0.0176 |
+| Fully warm | $0.0033 |
+
+The prompt was "reply with exactly one word". The cost is the CLI's own
+preamble: roughly 29,000 tokens of Claude Code system prompt and tool
+definitions, carried on every single invocation, cached for an hour and cold
+again after that.
+
+A real rehearsal suggestion, same question to each model:
+
+| Model | Latency | Cost |
+| --- | --- | --- |
+| `claude-opus-5` | 17.9s | $0.2177 |
+| `claude-sonnet-5` | 20.1s | $0.1553 |
+| `claude-haiku-4-5` | 11.9s | $0.0311 |
+
+Two conclusions follow, and both shaped the design.
+
+**The gate cannot be a model.** At $0.0033 warm and $0.0254 cold per call, a
+model-based gate firing every thirty seconds costs roughly $0.40 an hour warm
+and far more cold, to answer yes or no. So [`jay-agent::gate`] is rules: a
+question mark, an interrogative opening, a wake phrase, or a deterministic
+event. It costs nothing and the subscription pays only for escalations.
+
+**Latency is a fixed overhead, not a model property.** Haiku is seven times
+cheaper than Opus and still takes twelve seconds, because the time goes on
+process spawn and preamble rather than on thinking. That is fine for rehearsal,
+where the gap between questions is long, and for anything reviewed afterwards.
+It is too slow to help mid-sentence in a live pairing session. Making live
+suggestions fast would mean the HTTP API with an API key, which skips the
+preamble entirely but is a separate bill from the subscription. That is a
+decision to take deliberately rather than drift into.
+
 ## Backend is the Claude Max subscription via the local CLI
 
 Not an API key. The `claude` CLI already holds the OAuth session, so headless
