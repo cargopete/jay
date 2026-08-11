@@ -36,15 +36,32 @@ pub struct Line {
     /// How far behind live this line landed, for the status row.
     pub lag: std::time::Duration,
     pub kind: Kind,
+    /// Seconds since the session started, for the archived transcript.
+    ///
+    /// Reading a session back, "four minutes of silence here" is often the
+    /// most informative thing in it.
+    pub at: std::time::Duration,
 }
 
 impl Line {
     pub fn transcript(speaker: impl Into<String>, text: impl Into<String>, lag: std::time::Duration) -> Self {
-        Self { speaker: speaker.into(), text: text.into(), lag, kind: Kind::Transcript }
+        Self {
+            speaker: speaker.into(),
+            text: text.into(),
+            lag,
+            kind: Kind::Transcript,
+            at: std::time::Duration::ZERO,
+        }
     }
 
     pub fn suggestion(text: impl Into<String>, lag: std::time::Duration) -> Self {
-        Self { speaker: "jay".into(), text: text.into(), lag, kind: Kind::Suggestion }
+        Self {
+            speaker: "jay".into(),
+            text: text.into(),
+            lag,
+            kind: Kind::Suggestion,
+            at: std::time::Duration::ZERO,
+        }
     }
 
     pub fn notice(text: impl Into<String>) -> Self {
@@ -53,7 +70,15 @@ impl Line {
             text: text.into(),
             lag: std::time::Duration::ZERO,
             kind: Kind::Notice,
+            at: std::time::Duration::ZERO,
         }
+    }
+
+    /// Stamp when this happened, relative to the start of the session.
+    #[must_use]
+    pub fn at(mut self, elapsed: std::time::Duration) -> Self {
+        self.at = elapsed;
+        self
     }
 }
 

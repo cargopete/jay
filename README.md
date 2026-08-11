@@ -95,6 +95,17 @@ Length costs latency, so `--hint` is fast: measured on the same question, a
 full answer took 17.9s and a hint 5.4s, because the time goes on generating
 rather than thinking.
 
+### Sessions
+
+Every `transcribe` run archives itself to a timestamped file under
+`~/Library/Application Support/jay/sessions/` — the conversation, what jay said,
+elapsed times, and the cost of each suggestion. No flag required, because a
+feedback loop that depends on remembering a flag is a loop that does not run.
+
+It is written to be replayed, not just read: `jay ask --context <session>` puts
+any moment back through the real prompt path, which is the only honest way to
+tell whether a change to the prompts actually helped.
+
 ### Context
 
 jay keeps the whole session — 600 lines — and chooses what to send at ask time.

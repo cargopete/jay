@@ -200,13 +200,8 @@ enum Command {
         /// cheapest way to stop suggestions reading generic.
         #[arg(long)]
         brief: Option<std::path::PathBuf>,
-        /// Append the transcript here as it happens.
-        ///
-        /// Two reasons. The debrief afterwards wants the whole session, and
-        /// `jay ask --mode rehearsal --context <this file>` is the point of
-        /// the exercise. And when jay is launched through `open -a` for the
-        /// system audio permission, LaunchServices takes stdout with it, so
-        /// this is the only way to see what happened.
+        /// Where to write the session. Defaults to a timestamped file under
+        /// the sessions directory; every run is archived either way.
         #[arg(long)]
         save: Option<std::path::PathBuf>,
     },
@@ -380,11 +375,22 @@ fn transcribe(
     let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
     let (request_tx, request_rx) = crossbeam_channel::bounded::<jay_ui::Request>(2);
 
+    // Every session is archived, without being asked to. That is the whole
+    // feedback loop: the most useful input this project has had was a recording
+    // of a real interview, and a loop that depends on remembering a flag is a
+    // loop that does not run.
+    let path = save.unwrap_or_else(jay_agent::archive::new_session_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    println!("session → {}", path.display());
+
     // Tee the line stream to disk. Its own consumer rather than a branch in
     // each renderer, so the transcript is identical whether you ran with the
     // panel or without.
-    let (line_tx, saver) = match save {
-        Some(path) => {
+    let (line_tx, saver) = {
+        {
             let (save_tx, save_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
             // Moved, not cloned. A clone would leave the original sender alive
             // in this scope — shadowed by the binding below but never dropped
@@ -402,15 +408,36 @@ fn transcribe(
                             return;
                         }
                     };
+                    let _ = writeln!(
+                        file,
+                        "# jay session\n\nTimes are minutes:seconds from the start.\n\n\
+                         Replay any moment through the real prompt path with:\n\
+                         `jay ask --mode rehearsal --context <this file> \"<the question>\"`\n"
+                    );
+
+                    // Stamped here rather than at each of the three places a
+                    // line is created: every line passes through this thread,
+                    // so one clock serves them all.
+                    let session_started = Instant::now();
+
                     for line in save_rx {
+                        let at = if line.at.is_zero() {
+                            session_started.elapsed()
+                        } else {
+                            line.at
+                        };
+                        let clock =
+                            format!("{:02}:{:02}", at.as_secs() / 60, at.as_secs() % 60);
                         let written = match line.kind {
                             jay_ui::Kind::Transcript => {
-                                writeln!(file, "{}: {}", line.speaker, line.text)
+                                writeln!(file, "[{clock}] {}: {}", line.speaker, line.text)
                             }
-                            jay_ui::Kind::Suggestion => {
-                                writeln!(file, "\n--- jay ---\n{}\n-----------\n", line.text)
-                            }
-                            jay_ui::Kind::Notice => writeln!(file, "({})", line.text),
+                            jay_ui::Kind::Suggestion => writeln!(
+                                file,
+                                "\n[{clock}] --- jay ---\n{}\n-----------\n",
+                                line.text
+                            ),
+                            jay_ui::Kind::Notice => writeln!(file, "[{clock}] ({})", line.text),
                         };
                         if written.is_err() {
                             return;
@@ -424,7 +451,6 @@ fn transcribe(
                 .context("spawning the transcript writer")?;
             (save_tx, Some(handle))
         }
-        None => (line_tx, None),
     };
 
     if !overlay {

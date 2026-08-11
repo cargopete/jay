@@ -82,10 +82,13 @@ open -a "$PWD/target/release/jay.app" --args \
 `scripts/bundle.sh` **copies** the binary, so a bundle built before your last
 `cargo build` runs the old code. This has already caught me out once.
 
-`--seconds 0` runs until you close the panel. `--save` is not optional in
-practice: `open -a` detaches jay from the terminal and takes stdout with it, so
-without it the only record is what fits in the panel — and the debrief
-afterwards wants the whole session.
+`--seconds 0` runs until you close the panel.
+
+**Every run archives itself.** You do not need `--save`; a timestamped file
+appears under `~/Library/Application Support/jay/sessions/` holding the
+conversation, what jay said, when each thing happened, and what each suggestion
+cost. That file is the feedback loop — it is an evaluation set, not a log, and
+any moment in it can be replayed through the real prompt path.
 
 Start a second run with `--mode system-design --save part2.txt` for part two.
 
@@ -126,7 +129,8 @@ implementation, and about three times faster.
 The debrief is the part that makes you better, and it is a different mode:
 
 ```sh
-jay ask --mode rehearsal --brief brief.md --context transcript.txt \
+jay ask --mode rehearsal --brief brief.md \
+  --context ~/Library/Application\ Support/jay/sessions/<the-session>.md \
   "Return the size of the largest connected flooded zone in a grid."
 ```
 

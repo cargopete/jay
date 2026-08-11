@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+pub mod archive;
 pub mod brief;
 pub mod claude;
 pub mod context;
