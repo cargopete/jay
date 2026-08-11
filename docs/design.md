@@ -40,10 +40,12 @@ The worker carries the partial interleaved frame between ring reads rather
 than discarding it. Discarding it would rotate the channel order and the
 downmix would quietly start averaging the wrong pairs.
 
-## Frames are 20 ms
+## Frames are 32 ms
 
-320 samples at 16 kHz. It is the frame size Silero VAD is happiest with and
-small enough that the latency budget stays honest.
+512 samples at 16 kHz. Not a free choice: Silero v5 accepts exactly 512 samples
+at 16 kHz and rejects anything else, so the whole pipeline is framed to suit the
+VAD rather than the other way round. (This began life at 320 samples, which is
+the number you would pick on latency grounds alone, and the VAD refused it.)
 
 ## `captured_at` is stamped in capture, not on arrival
 
