@@ -3,6 +3,35 @@
 Written for a two-part loop — 40 minutes of coding, 40 of system design — with
 a partner playing interviewer.
 
+## First, run the preflight
+
+macOS permissions fail silently — an ungranted audio tap returns silence, an
+ungranted screen capture returns an error nobody reads — so the only way to know
+is to try each one and look.
+
+```sh
+scripts/bundle.sh debug
+open -a "$PWD/target/debug/jay.app" --args check --out check.txt
+cat check.txt
+```
+
+It exercises the microphone, the system tap, screen capture, the whisper
+weights and the `claude` CLI, and it warms the prompt cache while it is at it.
+Expect this:
+
+```
+  mic       OK   MacBook Pro Microphone
+  system    OK   tap running at 48000 Hz
+  screen    OK   captured 412 KB
+  whisper   OK   …/ggml-small.en.bin
+  claude    OK   6.6s, $0.0135 — cache is now warm
+```
+
+**If `screen` says FAIL**, jay has just asked macOS for the permission, so it
+will now appear in **System Settings › Privacy & Security › Screen & System
+Audio Recording**. Tick it, then run the check again. Left unfixed, every button
+press sends the conversation and silently no screenshot.
+
 ## Before they arrive
 
 **The interviewer is on a call**, so their voice arrives on system audio and

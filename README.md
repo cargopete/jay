@@ -64,6 +64,7 @@ crates/
 ## Trying it
 
 ```sh
+cargo run -p jay -- check                # permissions, weights, subscription
 cargo run -p jay -- devices              # what inputs can jay see
 cargo run -p jay -- listen --seconds 6   # capture smoke test with levels
 cargo run -p jay -- transcribe           # live transcription from the mic
