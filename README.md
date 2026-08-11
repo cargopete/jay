@@ -52,7 +52,7 @@ refuses them just as silently — an ungranted audio tap returns an unbroken
 stream of zeros rather than an error.
 
 ```sh
-open -a ~/Projects/jay/target/release/jay.app --args check --out /tmp/jay-check.txt
+open -n -a ~/Projects/jay/target/release/jay.app --args check --out /tmp/jay-check.txt
 cat /tmp/jay-check.txt
 ```
 
@@ -81,14 +81,14 @@ session rather than during one.
 Then run it:
 
 ```sh
-open -a ~/Projects/jay/target/release/jay.app --args \
+open -n -a ~/Projects/jay/target/release/jay.app --args \
   transcribe --overlay --source both --mode coding --seconds 0
 ```
 
 A small dark panel appears above everything, draggable by its header. Talk.
 Press **ask jay** when you want the answer. Close it with **×**.
 
-> Use the absolute path. `open -a "$PWD/..."` only works if you are already in
+> Use the absolute path. `open -n -a "$PWD/..."` only works if you are already in
 > the repository, and fails confusingly if you are not.
 
 ---
@@ -288,16 +288,37 @@ whatever was in flight.
 ## Troubleshooting
 
 **"cannot be opened … no such file".** `$PWD` was not the repository. Use the
-absolute path: `open -a ~/Projects/jay/target/release/jay.app --args …`
+absolute path: `open -n -a ~/Projects/jay/target/release/jay.app --args …`
 
 **The panel says nothing.** Correct, until you press the button.
 
-**No `them:` lines.** You launched from a shell rather than through `open -a`,
-so macOS is feeding the tap silence. Re-run `jay check`.
+**No `them:` lines.** Two possibilities. If the `them` meter reads `NO FRAMES`,
+you launched from a shell rather than through `open -n -a`, so the tap is
+unauthorised — re-run `jay check`. If it reads `QUIET`, the tap is fine and
+nothing is playing: **a process tap produces no callbacks at all on an idle
+output**, so a silent machine and a broken tap look the same until sound
+arrives. `jay check` reports zero frames on the system line for exactly this
+reason; play something before you trust it.
 
-**Every question appears twice, once as `you:`.** Echo — the other person's
-voice is leaving your speakers and returning through your microphone. Wear
-headphones.
+**Nothing happens and the meters say `NO FRAMES`.** The capture never started
+or has died. The panel will now also print `capture stopped: …` if the pipeline
+itself failed. Before this, that error only went to a log, and an app bundle
+has no terminal to log to, so the panel simply sat there looking ready.
+
+**Two jay windows.** Don't. Two instances contend for the microphone and both
+lose frames — measured at 222 of an expected 281 while sharing.
+
+**Every question appears twice, once as `you:`.** Echo. The other person's
+voice leaves your speakers and returns through your microphone, so it is
+captured on both channels and one copy is blamed on you. Reproduced here
+exactly:
+
+```
+[00:11] them: Given a two-dimensional grid of ones and zeros, find the largest island by area.
+[00:11] you:  Given a two-dimensional grid of ones and zeros, find the largest island by area.
+```
+
+**Wear headphones.** This is not a tuning problem, it is a room.
 
 **"still thinking about the last one".** One suggestion runs at a time, by
 design: the alternative is the transcriber stalling behind it and losing audio.

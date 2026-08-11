@@ -117,6 +117,12 @@ pub fn run(
     requests: crossbeam_channel::Sender<Request>,
     model_name: String,
     levels: std::sync::Arc<jay_audio::Levels>,
+    // `expected` is which channels the session asked for, as `[mic, system]`.
+    // Without it the panel cannot tell a channel that was never switched on
+    // from one that was switched on and is delivering nothing, and those are
+    // opposite problems: the first is correct, the second is the whole reason
+    // the meters exist.
+    expected: [bool; 2],
 ) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -132,7 +138,9 @@ pub fn run(
     eframe::run_native(
         "jay",
         options,
-        Box::new(move |cc| Ok(Box::new(Overlay::new(cc, rx, requests, model_name, levels)))),
+        Box::new(move |cc| {
+            Ok(Box::new(Overlay::new(cc, rx, requests, model_name, levels, expected)))
+        }),
     )
 }
 
@@ -165,6 +173,8 @@ struct Overlay {
     partial: Option<String>,
     /// Live input levels, written by the capture loop.
     levels: std::sync::Arc<jay_audio::Levels>,
+    /// Which channels this session asked for, as `[mic, system]`.
+    expected: [bool; 2],
     /// Displayed needle position per channel, and the frame count it was taken
     /// at. Held so the meter can fall smoothly rather than flickering at the
     /// frame rate, and so a stalled stream can be told from a silent one.
@@ -178,6 +188,7 @@ impl Overlay {
         requests: crossbeam_channel::Sender<Request>,
         model_name: String,
         levels: std::sync::Arc<jay_audio::Levels>,
+        expected: [bool; 2],
     ) -> Self {
         // Dark, translucent, and low contrast enough to sit over a terminal
         // without becoming the thing you look at.
@@ -206,6 +217,7 @@ impl Overlay {
             last_signal: None,
             partial: None,
             levels,
+            expected,
             shown: [(0.0, 0); 2],
         }
     }
@@ -277,13 +289,20 @@ impl Overlay {
                 ui.painter().rect_filled(fill, 1.0, colour);
             }
 
-            // The word beside the meter is the diagnosis, and the three states
-            // are genuinely different faults.
-            let (word, tint) = match (ever_ran, reading.running, reading.speaking) {
+            // The word beside the meter is the diagnosis, and these are
+            // genuinely different faults with different fixes.
+            let waited = self.started.elapsed() > SETTLE;
+            let (word, tint) = match (self.expected[slot], ever_ran, reading.running) {
+                // Never asked for. Correct, and not a fault.
                 (false, _, _) => ("off", INK_FAINT),
-                (true, false, _) => ("no input", EMBER),
-                (true, true, true) => ("speech", VERDIGRIS),
-                (true, true, false) => ("quiet", INK_FAINT),
+                // Asked for, and has never delivered a frame. Give the device
+                // a moment to start before calling it dead, then say so
+                // loudly, because this is the state that wasted an evening.
+                (true, false, _) if waited => ("no frames", EMBER),
+                (true, false, _) => ("starting", INK_FAINT),
+                (true, true, false) => ("stalled", EMBER),
+                (true, true, true) if reading.speaking => ("speech", VERDIGRIS),
+                (true, true, true) => ("quiet", INK_FAINT),
             };
             ui.label(
                 egui::RichText::new(word.to_uppercase())
@@ -336,6 +355,10 @@ const EMBER: egui::Color32 = egui::Color32::from_rgb(0xe8, 0x92, 0x2a);
 /// terminal, completely unreadable. A panel you cannot read is not a subtle
 /// panel.
 const GROUND_ALPHA: f32 = 0.97;
+
+/// How long a channel may take to deliver its first frame before the panel
+/// calls it dead. A cpal stream takes a moment to open; a minute does not.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// How recently a line must have arrived for the intake lamp to be lit.
 ///

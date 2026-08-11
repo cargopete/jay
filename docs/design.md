@@ -358,3 +358,47 @@ improvement of the four: with `--output-format stream-json
 --include-partial-messages` the panel paints the answer as it is written, so
 the first words arrive around five seconds instead of the whole thing at
 fourteen. Late help is only useless if you cannot start reading it.
+
+## Two traps that make a working stack look broken
+
+Both found while chasing a panel that showed `OFF` on both meters. Neither was
+a bug in the pipeline, which was working the whole time.
+
+**A process tap on an idle output produces no callbacks at all.** Not silent
+frames — no frames. Measured: `listen --source system` on a quiet machine gives
+0 frames of an expected 312; with `say` running through the speakers, the same
+command gives 312 of 312 at peak 0.271 RMS and 205µs lag. So "the tap is
+delivering nothing" is the *normal* state of a silent Mac and cannot be
+distinguished from a broken tap without playing something. `jay check` says so
+on the system line rather than reporting a failure.
+
+**`open -a` silently discards `--args` if the app is already running.** It
+activates the existing instance, exits 0, and starts nothing. Verified: two
+launches two seconds apart produced one process, and the second command's
+`--out` file was never written. Every instruction in this repository therefore
+uses `open -n -a`, which forces a new instance. Worth knowing that two
+instances then contend for the microphone and both lose frames — 222 of an
+expected 281 while sharing — so `-n` is for making sure you get *the* session,
+not for running several.
+
+The connecting theme with the permission trilogy: **every one of these reports
+success while doing nothing.** A tap that returns no callbacks, a launcher that
+exits 0 having ignored its arguments, a TCC denial served as digital silence.
+None of them raises an error, so none of them can be caught by handling errors.
+They can only be caught by measuring the thing itself, which is what `jay check`
+and the panel meters are for.
+
+## A failure the user cannot see is not a failure the user can report
+
+`run_pipeline` returning an error logged it with `tracing::error!` and did
+nothing else. Launched through LaunchServices there is no terminal attached, so
+the log went nowhere at all, and the panel — which had already printed its
+"ready in Coding mode" notice before the failure point — sat there looking
+perfectly healthy for as long as anyone cared to watch.
+
+The pipeline thread now keeps a clone of the line sender back specifically so a
+dying pipeline can still reach the panel. The meters likewise distinguish four
+states rather than two: `OFF` for a channel never asked for, `STARTING` for the
+first few seconds, `NO FRAMES` in ember for a channel that was asked for and
+has delivered nothing, and `STALLED` for one whose frames have stopped. Only
+the first is not a fault.

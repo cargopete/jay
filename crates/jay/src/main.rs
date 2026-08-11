@@ -522,6 +522,11 @@ fn transcribe(
         .name("jay-pipeline".into())
         .spawn({
             let levels = std::sync::Arc::clone(&levels);
+            // Kept back so a dying pipeline can still reach the panel. This
+            // used to log and nothing more, and the app bundle has no terminal
+            // to log to, so the failure mode was a panel that sat there
+            // looking ready for as long as you cared to watch it.
+            let complaints = line_tx.clone();
             move || {
             if let Err(e) = run_pipeline(
                 source,
@@ -535,12 +540,21 @@ fn transcribe(
                 levels,
             ) {
                 tracing::error!(%e, "capture pipeline stopped");
+                let _ = complaints.send(jay_ui::Line::notice(format!(
+                    "capture stopped: {e}. Nothing more will be heard this session."
+                )));
             }
             }
         })
         .context("spawning the capture pipeline")?;
 
-    jay_ui::run(line_rx, request_tx, model.to_string(), levels)
+    jay_ui::run(
+        line_rx,
+        request_tx,
+        model.to_string(),
+        levels,
+        [source.uses_mic(), source.uses_system()],
+    )
         .map_err(|e| anyhow::anyhow!("overlay: {e}"))
 }
 
