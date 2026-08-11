@@ -89,6 +89,19 @@ afterwards wants the whole session.
 
 Start a second run with `--mode system-design --save part2.txt` for part two.
 
+## Sharing your screen
+
+**Share a window, not the whole screen.** jay cannot reliably hide itself and
+does not pretend to: the flag that used to exclude a window from capture
+(`NSWindow.sharingType = .none`) stopped working for ScreenCaptureKit in macOS
+15.4, and Meet's screen share goes through ScreenCaptureKit. A switch labelled
+"invisible" that silently does nothing is worse than none, because you plan
+around it.
+
+Sharing a single window is structural rather than a flag that might hold: share
+the editor, keep the panel on a second display or beside the shared window, and
+jay is never in the captured region at all.
+
 ## During
 
 **jay never volunteers.** It listens, transcribes and stays quiet until you
