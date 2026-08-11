@@ -66,10 +66,35 @@ const SMALL_TALK: &[&str] = &[
 /// escalating on it would be both expensive and irritating.
 const MIN_QUESTION_WORDS: usize = 4;
 
+/// Who said the thing being classified.
+///
+/// This matters more than it looks. In an interview or a pairing session the
+/// questions worth answering come from the *other* person; your own speech is
+/// the record of what you have already covered, and a question you mutter to
+/// yourself while thinking ("but what do we do, do we ask them to
+/// authenticate?" — taken from a real transcript) is thinking aloud, not a
+/// request for help. Treating both identically is the single largest source of
+/// noise in a tool like this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speaker {
+    /// You. Your own microphone.
+    You,
+    /// Everyone else, arriving over system audio.
+    Them,
+}
+
 /// Decide whether an utterance is worth waking the expensive model for.
 ///
-/// Returns `None` far more often than `Some`, which is the point.
+/// Speaker-blind: kept for the single-channel case and for tests. Prefer
+/// [`classify_from`] when the channel is known.
 pub fn classify(text: &str) -> Option<Trigger> {
+    classify_from(text, Speaker::Them)
+}
+
+/// As [`classify`], but knowing who spoke.
+///
+/// Returns `None` far more often than `Some`, which is the point.
+pub fn classify_from(text: &str, speaker: Speaker) -> Option<Trigger> {
     let normalised = text.trim().to_ascii_lowercase();
     if normalised.is_empty() {
         return None;
@@ -90,6 +115,13 @@ pub fn classify(text: &str) -> Option<Trigger> {
         } else {
             asked.to_string()
         }));
+    }
+
+    // Past this point only the other person's questions are acted on. Yours
+    // are you thinking aloud; jay hears them, records them as context, and
+    // keeps its mouth shut unless you say its name.
+    if speaker == Speaker::You {
+        return None;
     }
 
     if normalised.split_whitespace().count() < MIN_QUESTION_WORDS {
@@ -203,6 +235,42 @@ mod tests {
                 "should have escalated: {line}"
             );
         }
+    }
+
+    #[test]
+    fn your_own_thinking_aloud_is_not_a_request_for_help() {
+        // Verbatim from the real transcript: the candidate reasoning out loud
+        // mid-answer. The competing tool treated this as a question and
+        // answered it, which is help arriving on top of the person it is
+        // meant to be helping.
+        assert_eq!(
+            classify_from(
+                "But what do we do? We ask them to authenticate or is there \
+                 something like, uh, a different idea?",
+                Speaker::You
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_same_question_from_them_does_escalate() {
+        assert!(matches!(
+            classify_from(
+                "How would you make sure only the creator can update the link?",
+                Speaker::Them
+            ),
+            Some(Trigger::Question(_))
+        ));
+    }
+
+    #[test]
+    fn you_can_still_address_jay_by_name() {
+        // Speaker gating must not stop you asking jay directly.
+        assert!(matches!(
+            classify_from("hey jay, what am I forgetting", Speaker::You),
+            Some(Trigger::Addressed(_))
+        ));
     }
 
     #[test]

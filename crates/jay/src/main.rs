@@ -101,6 +101,9 @@ enum Command {
         /// Model for the reasoning step.
         #[arg(long, default_value = jay_agent::claude::DEFAULT_MODEL)]
         model: String,
+        /// Standing context for the session: a job spec, a CV, an RFC.
+        #[arg(long)]
+        brief: Option<std::path::PathBuf>,
         /// Read the surrounding conversation from a file, one line per turn.
         ///
         /// Lets a recorded transcript be replayed through the real prompt
@@ -158,6 +161,12 @@ enum Command {
         /// Minimum seconds between suggestions.
         #[arg(long, default_value_t = 30)]
         cooldown: u64,
+        /// Standing context for the session: a job spec, a CV, an RFC.
+        ///
+        /// Read once at startup and sent with every suggestion. The single
+        /// cheapest way to stop suggestions reading generic.
+        #[arg(long)]
+        brief: Option<std::path::PathBuf>,
     },
 }
 
@@ -188,6 +197,7 @@ fn main() -> Result<()> {
             mode,
             budget,
             cooldown,
+            brief,
         } => transcribe(
             source,
             device.map(Into::into),
@@ -199,15 +209,30 @@ fn main() -> Result<()> {
                 budget_usd: budget,
                 cooldown: Duration::from_secs(cooldown),
             }),
+            match brief {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading the brief at {}", path.display()))?,
+                ),
+                None => None,
+            },
         ),
         Command::File { path, model } => transcribe_file(&path, model),
         Command::Ask {
             question,
             mode,
             model,
+            brief,
             context,
             screen,
-        } => ask(&question, mode.into(), &model, context.as_deref(), screen),
+        } => ask(
+            &question,
+            mode.into(),
+            &model,
+            brief.as_deref(),
+            context.as_deref(),
+            screen,
+        ),
     }
 }
 
@@ -301,6 +326,7 @@ fn transcribe(
     seconds: u64,
     overlay: bool,
     assist: Option<Assist>,
+    brief: Option<String>,
 ) -> Result<()> {
     // Everything downstream reads one line channel, so the terminal and the
     // overlay are just two consumers of the same stream rather than two paths
@@ -334,7 +360,16 @@ fn transcribe(
             .context("spawning the printer")?;
 
         // No panel means no button, so no request channel.
-        let result = run_pipeline(source, device.as_deref(), model, seconds, line_tx, assist, None);
+        let result = run_pipeline(
+            source,
+            device.as_deref(),
+            model,
+            seconds,
+            line_tx,
+            assist,
+            None,
+            brief,
+        );
         let _ = printer.join();
         return result;
     }
@@ -352,6 +387,7 @@ fn transcribe(
                 line_tx,
                 assist,
                 Some(request_rx),
+                brief,
             ) {
                 tracing::error!(%e, "capture pipeline stopped");
             }
@@ -404,10 +440,14 @@ struct Ask {
 fn spawn_assistant(
     assist: Assist,
     model: &str,
+    brief: Option<String>,
     questions: crossbeam_channel::Receiver<Ask>,
     lines: crossbeam_channel::Sender<jay_ui::Line>,
 ) -> Result<std::thread::JoinHandle<()>> {
-    let claude = jay_agent::claude::Claude::new(model);
+    let claude = match brief {
+        Some(brief) => jay_agent::claude::Claude::new(model).with_brief(brief),
+        None => jay_agent::claude::Claude::new(model),
+    };
     std::thread::Builder::new()
         .name("jay-assist".into())
         .spawn(move || {
@@ -471,6 +511,7 @@ fn run_pipeline(
     lines: crossbeam_channel::Sender<jay_ui::Line>,
     assist: Option<Assist>,
     requests: Option<crossbeam_channel::Receiver<jay_ui::Request>>,
+    brief: Option<String>,
 ) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
 
@@ -520,6 +561,7 @@ fn run_pipeline(
             let handle = spawn_assistant(
                 settings,
                 jay_agent::claude::DEFAULT_MODEL,
+                brief.clone(),
                 rx,
                 lines.clone(),
             )?;
@@ -654,7 +696,13 @@ fn run_pipeline(
                 // question starts its (slow) escalation as early as possible.
                 if auto_gate
                     && let Some(tx) = &question_tx
-                    && let Some(trigger) = jay_agent::gate::classify(&result.text)
+                    && let Some(trigger) = jay_agent::gate::classify_from(
+                        &result.text,
+                        match utterance.channel {
+                            Channel::Mic => jay_agent::gate::Speaker::You,
+                            Channel::System => jay_agent::gate::Speaker::Them,
+                        },
+                    )
                 {
                     let asked = match trigger {
                         jay_agent::gate::Trigger::Question(q)
@@ -755,6 +803,7 @@ fn ask(
     question: &str,
     mode: jay_agent::Mode,
     model: &str,
+    brief: Option<&std::path::Path>,
     context: Option<&std::path::Path>,
     screen: bool,
 ) -> Result<()> {
@@ -795,7 +844,14 @@ fn ask(
         None => Vec::new(),
     };
 
-    let suggestion = jay_agent::claude::Claude::new(model)
+    let mut claude = jay_agent::claude::Claude::new(model);
+    if let Some(path) = brief {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading the brief at {}", path.display()))?;
+        claude = claude.with_brief(text);
+    }
+
+    let suggestion = claude
         .suggest_with(mode, asked, &history, shot.as_deref())
         .context("asking claude");
 

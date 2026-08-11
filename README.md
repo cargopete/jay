@@ -46,6 +46,7 @@ Early. Stage 1 is capture, transcription and an overlay.
 | Suggestion gate (rules, free) | Working |
 | Live pipeline: listen → gate → suggest → panel | Working, tested end to end |
 | Hand-asked suggestions (button + screenshot) | Built, button untested by a human |
+| Speaker-aware gating, standing brief | Working, validated on a real transcript |
 | Suggestions via the Max subscription | Working, measured |
 | System audio capture (CoreAudio process taps) | Working, via a LaunchServices launch |
 | Screen capture on escalation | Built, permission path shared with audio |
@@ -71,7 +72,20 @@ cargo run -p jay -- transcribe --overlay # live transcript in a floating panel
 cargo run -p jay -- transcribe --assist  # …and suggestions when asked a question
 cargo run -p jay -- ask "why is this failing?" --mode dev
 cargo run -p jay -- ask "what is wrong here?" --mode dev --screen
+cargo run -p jay -- transcribe --overlay --brief job-spec.md
 ```
+
+**Give it a brief.** `--brief <file>` is standing context for the whole
+session — a job spec, your CV, the RFC you are pairing on, notes on the
+architecture. It is the cheapest large gain available: without it every
+suggestion is reasoned from a dozen lines of transcript and reads generic. It
+leads the prompt so it forms a stable prefix that prompt caching serves at a
+tenth of the price.
+
+**It knows who is talking.** Questions from the other side (system audio) can
+escalate; your own speech is recorded as context but never treated as a request
+for help, because a question you mutter while thinking is thinking aloud. Saying
+"hey jay" overrides that.
 
 The panel has an **ask jay** button, and that is the primary way to get a
 suggestion. Pressing it sends the recent conversation *and a screenshot of the

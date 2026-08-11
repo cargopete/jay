@@ -28,9 +28,15 @@ const TIMEOUT: Duration = Duration::from_secs(45);
 
 pub struct Claude {
     model: String,
-    /// Deny every tool. jay wants an opinion, not an agent loose in the
-    /// filesystem, and the tool definitions are most of the token cost.
     binary: String,
+    /// Standing context for the whole session: a job spec, a CV, the RFC being
+    /// paired on, notes on the architecture.
+    ///
+    /// This is the cheapest large gain available. Without it every suggestion
+    /// is reasoned from a dozen lines of transcript and nothing else, which is
+    /// why they read generic. It goes first in the prompt so it forms a stable
+    /// prefix that prompt caching can serve at a tenth of the price.
+    brief: Option<String>,
 }
 
 impl Default for Claude {
@@ -44,7 +50,16 @@ impl Claude {
         Self {
             model: model.into(),
             binary: std::env::var("JAY_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string()),
+            brief: None,
         }
+    }
+
+    /// Give jay standing context for the session.
+    #[must_use]
+    pub fn with_brief(mut self, brief: impl Into<String>) -> Self {
+        let brief = brief.into();
+        self.brief = (!brief.trim().is_empty()).then_some(brief);
+        self
     }
 
     pub fn model(&self) -> &str {
@@ -69,7 +84,7 @@ impl Claude {
         screenshot: Option<&std::path::Path>,
     ) -> Result<Suggestion> {
         let started = Instant::now();
-        let mut prompt = build_prompt(mode, question, transcript);
+        let mut prompt = build_prompt(mode, question, transcript, self.brief.as_deref());
         if let Some(path) = screenshot {
             prompt.push_str(&format!(
                 "\n\nWhat is on screen right now is at {}. Read it before answering; \
@@ -179,8 +194,20 @@ impl Claude {
     }
 }
 
-fn build_prompt(mode: Mode, question: &str, transcript: &[String]) -> String {
+fn build_prompt(
+    mode: Mode,
+    question: &str,
+    transcript: &[String],
+    brief: Option<&str>,
+) -> String {
     let mut prompt = String::new();
+
+    // First, so it is the stable prefix a cache can serve cheaply.
+    if let Some(brief) = brief {
+        prompt.push_str("Background for this whole session:\n");
+        prompt.push_str(brief.trim());
+        prompt.push_str("\n\n");
+    }
 
     if !transcript.is_empty() {
         prompt.push_str("Recent conversation, oldest first:\n");
@@ -235,6 +262,7 @@ mod tests {
             Mode::Rehearsal,
             "How would you design a rate limiter?",
             &["them: so let's talk about systems design".to_string()],
+            None,
         );
         assert!(prompt.contains("rate limiter"));
         assert!(prompt.contains("systems design"));
@@ -243,17 +271,37 @@ mod tests {
 
     #[test]
     fn prompt_works_without_transcript() {
-        let prompt = build_prompt(Mode::Dev, "the auth test went red", &[]);
+        let prompt = build_prompt(Mode::Dev, "the auth test went red", &[], None);
         assert!(prompt.contains("auth test"));
         assert!(!prompt.contains("Recent conversation"));
     }
 
     #[test]
+    fn the_brief_leads_so_a_cache_can_serve_it() {
+        let prompt = build_prompt(
+            Mode::Pairing,
+            "how should we shard this?",
+            &["them: right, next topic".to_string()],
+            Some("Role: senior backend engineer. Stack: Rust, Postgres."),
+        );
+        assert!(prompt.starts_with("Background for this whole session:"));
+        assert!(prompt.contains("senior backend engineer"));
+        // and the volatile parts still come after it
+        assert!(prompt.find("next topic").unwrap() > prompt.find("Postgres").unwrap());
+    }
+
+    #[test]
+    fn an_empty_brief_is_no_brief() {
+        let claude = Claude::new("m").with_brief("   \n  ");
+        assert!(claude.brief.is_none());
+    }
+
+    #[test]
     fn each_mode_asks_for_something_different() {
         let q = "why is this failing";
-        let rehearsal = build_prompt(Mode::Rehearsal, q, &[]);
-        let pairing = build_prompt(Mode::Pairing, q, &[]);
-        let dev = build_prompt(Mode::Dev, q, &[]);
+        let rehearsal = build_prompt(Mode::Rehearsal, q, &[], None);
+        let pairing = build_prompt(Mode::Pairing, q, &[], None);
+        let dev = build_prompt(Mode::Dev, q, &[], None);
         assert_ne!(rehearsal, pairing);
         assert_ne!(pairing, dev);
     }
