@@ -143,6 +143,7 @@ jay transcribe --overlay --source both --mode coding \
 | `--save` | Override where the session is archived. |
 | `--seconds` | `0` runs until you close the panel. |
 | `--model` | Whisper size: `tiny`, `base`, `small`. Default `small`. |
+| `--vocab` | Extra words to expect, comma separated. Primes the transcriber. |
 
 ### `ask`
 
@@ -232,6 +233,13 @@ no tools need be enabled at all.
 the first words land at about five seconds instead of the whole thing at
 fourteen, and five seconds into a conversation you can still use what you
 read.
+
+**One process per session.** The CLI is spawned once and kept, so only the
+first press pays the 4.7 second spawn-and-preamble toll — measured at 3.1s for
+the first answer and 1.7s for the second, including a 75 second idle gap
+between them. The process also keeps the conversation, so the third question of
+a round is asked of something that heard the first two. If it dies, jay
+restarts it and asks again once.
 
 ---
 
@@ -334,7 +342,12 @@ Both kinds of drop now say so in the panel rather than only in a debug log.
 `too quiet to trust` notice. If it says `NO INPUT`, the capture thread has
 stopped. If it says `OFF`, that channel was never started, so check `--source`.
 
-**Jargon mangled.** `--model small` is the default and the best wired up.
+**Jargon mangled.** The transcriber is primed with the vocabulary of technical
+interviews and of Rust, which is the difference between "reverse a singly
+linked list" and "reverse the link please" — both real transcripts of the same
+sentence, before and after. Add anything specific to your round with
+`--vocab "SiloBin, Redpanda, Kademlia"`. `--model small` is the default and the
+best wired up.
 
 ---
 

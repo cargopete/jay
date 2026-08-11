@@ -20,7 +20,27 @@ pub struct Whisper {
     state: WhisperState,
     threads: i32,
     name: String,
+    /// Words the decoder is told to expect. See [`Whisper::prime`].
+    vocabulary: &'static str,
 }
+
+/// The vocabulary every session gets, before anything problem-specific.
+///
+/// Two registers, because both appear in the same sentence: the language of
+/// algorithmic interviews, and the language Chief actually works in. Terms are
+/// chosen for being both likely and easy to mishear — "idempotent" and
+/// "jemalloc" are the sort of word a general model has no reason to reach for.
+const DEFAULT_VOCABULARY: &str = "This is a technical interview about \
+algorithms and system design. Likely terms: linked list, binary tree, hash \
+map, breadth-first search, depth-first search, dynamic programming, two \
+pointers, sliding window, time complexity, space complexity, big O, amortised, \
+in-place, memoisation, backtracking, adjacency list, topological sort, heap, \
+trie, union-find. Also: Rust, borrow checker, ownership, lifetimes, trait, \
+enum, Option, Result, iterator, async, tokio, mutex, atomic, Arc, idempotent, \
+idempotency, jemalloc, throughput, latency, sharding, partition, replication, \
+consistency, quorum, write-ahead log, backpressure, rate limiter, cache \
+invalidation, load balancer, Postgres, Kafka, Redis, S3, blob storage, CDN, \
+schema, index, subgraph, indexer, blockchain.";
 
 impl Whisper {
     /// Load `model`, downloading the weights on first use.
@@ -60,16 +80,35 @@ impl Whisper {
             state,
             threads,
             name,
+            vocabulary: DEFAULT_VOCABULARY,
         })
+    }
+
+    /// Prime the decoder with the vocabulary of the round.
+    ///
+    /// whisper decodes conditioned on a prompt, so telling it which words are
+    /// likely is the cheapest accuracy there is. Untuned, `small.en` heard
+    /// "reverse the linked list" as "reverse the link please" — jay answered
+    /// correctly anyway because the surrounding context carried it, but the
+    /// same failure on the problem statement itself would poison everything
+    /// downstream, and that is the one sentence spoken only once.
+    ///
+    /// Leaked deliberately: the params borrow for `'static`, this is set once
+    /// per process, and the alternative is threading a lifetime through the
+    /// whole model for a few hundred bytes.
+    pub fn prime(&mut self, vocabulary: &str) {
+        let combined = format!("{DEFAULT_VOCABULARY} {}", vocabulary.trim());
+        self.vocabulary = Box::leak(combined.into_boxed_str());
     }
 
     /// Free of `self` so the immutable borrow does not collide with the
     /// mutable borrow of `state` at the call site.
-    fn params(threads: i32) -> FullParams<'static, 'static> {
+    fn params(threads: i32, vocabulary: &'static str) -> FullParams<'static, 'static> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(threads);
         params.set_language(Some("en"));
         params.set_translate(false);
+        params.set_initial_prompt(vocabulary);
 
         // Each utterance is transcribed on its own. Carrying decoder context
         // between them lets one hallucination seed the next, and the VAD has
@@ -104,7 +143,7 @@ impl SpeechModel for Whisper {
             samples
         };
 
-        let params = Self::params(self.threads);
+        let params = Self::params(self.threads, self.vocabulary);
         self.state
             .full(params, audio)
             .map_err(|e| SttError::Whisper(e.to_string()))?;

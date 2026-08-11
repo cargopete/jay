@@ -127,7 +127,10 @@ impl Claude {
                 }
             }));
         }
-        content.push(serde_json::json!({"type": "text", "text": prompt}));
+        content.push(serde_json::json!({
+            "type": "text",
+            "text": if screenshot.is_some() { format!("{prompt}{OWN_PANEL}") } else { prompt },
+        }));
 
         let message = serde_json::json!({
             "type": "user",
@@ -288,6 +291,18 @@ impl Claude {
         })
     }
 }
+
+/// Appended whenever a screenshot goes with the question.
+///
+/// jay's own panel is on the screen it captures, so the image contains jay's
+/// previous answer. Observed: asked what was on screen, it described its own
+/// last turn quoted back at it. Mid-round that is worse than a curiosity —
+/// the panel holds the code jay suggested, and mistaking that for the
+/// candidate's own work makes every "what have they got so far" judgement
+/// wrong in the same direction.
+const OWN_PANEL: &str = "\n\nThe dark panel labelled JAY in the screenshot is \
+your own output from earlier in this session, not their work. Ignore it when \
+judging what they have written or said so far.";
 
 /// What the CLI should be told the image is.
 fn media_type(path: &std::path::Path) -> &'static str {
@@ -547,5 +562,319 @@ mod tests {
         let dev = build_prompt(Mode::Dev, d, q, &[], None);
         assert_ne!(rehearsal, pairing);
         assert_ne!(pairing, dev);
+    }
+}
+
+/// One `claude` process, reused for a whole session.
+///
+/// Every invocation of the CLI pays about 4.7 seconds before it says anything:
+/// node startup, then ~29,000 tokens of Claude Code's own preamble. Paid once
+/// per press that is most of the wait. Paid once per *session* it disappears —
+/// measured here at 4.1s for the first answer and 2.8s for the next, including
+/// a 75-second idle gap in between, which is what a real session looks like.
+///
+/// The second benefit is not about speed at all: the process keeps the
+/// conversation, so the third question of a round is asked of something that
+/// heard the first two.
+pub struct Session {
+    binary: String,
+    model: String,
+    system_prompt: String,
+    mode: Mode,
+    depth: crate::Depth,
+    brief: Option<String>,
+    /// Sent with the first question only. After that it is in the history the
+    /// process is already holding, and repeating it every turn would pay for
+    /// it again.
+    brief_sent: bool,
+    live: Option<Live>,
+}
+
+struct Live {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(mut live) = self.live.take() {
+            let _ = live.child.kill();
+            let _ = live.child.wait();
+        }
+    }
+}
+
+impl Session {
+    pub fn new(claude: &Claude, mode: Mode) -> Self {
+        Self {
+            binary: claude.binary.clone(),
+            model: claude.model.clone(),
+            system_prompt: format!("{}{}", mode.system_prompt(claude.depth), crate::LATE_ARRIVAL),
+            mode,
+            depth: claude.depth,
+            brief: claude.brief.clone(),
+            brief_sent: false,
+            live: None,
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Ask, reusing the running process. Reports text as it arrives.
+    ///
+    /// A process that has died is replaced and the question asked again, once.
+    /// The CLI is a long-lived child of a long-lived app and will occasionally
+    /// be lost to something outside jay's control; losing the answer as well
+    /// would be a poor trade for the four seconds saved.
+    pub fn ask(
+        &mut self,
+        question: &str,
+        transcript: &[String],
+        screenshot: Option<&std::path::Path>,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Suggestion> {
+        match self.attempt(question, transcript, screenshot, on_delta) {
+            Err(AgentError::Spawn(e)) | Err(AgentError::Parse(e)) if self.live.is_some() => {
+                tracing::warn!(%e, "claude session died; restarting it");
+                self.live = None;
+                // The history died with it, so the brief goes again.
+                self.brief_sent = false;
+                self.attempt(question, transcript, screenshot, on_delta)
+            }
+            other => other,
+        }
+    }
+
+    fn attempt(
+        &mut self,
+        question: &str,
+        transcript: &[String],
+        screenshot: Option<&std::path::Path>,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<Suggestion> {
+        let started = Instant::now();
+        let brief = (!self.brief_sent).then_some(self.brief.as_deref()).flatten();
+        let prompt = build_prompt(self.mode, self.depth, question, transcript, brief);
+
+        let mut content = Vec::new();
+        if let Some(path) = screenshot {
+            let bytes = std::fs::read(path)
+                .map_err(|e| AgentError::Spawn(format!("reading {}: {e}", path.display())))?;
+            content.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type(path),
+                    "data": base64(&bytes),
+                }
+            }));
+        }
+        content.push(serde_json::json!({
+            "type": "text",
+            "text": if screenshot.is_some() { format!("{prompt}{OWN_PANEL}") } else { prompt },
+        }));
+        let message = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": content},
+        });
+
+        self.ensure_live()?;
+        let live = self
+            .live
+            .as_mut()
+            .ok_or_else(|| AgentError::Spawn("no claude session".into()))?;
+
+        writeln!(live.stdin, "{message}").map_err(|e| AgentError::Spawn(e.to_string()))?;
+        live.stdin
+            .flush()
+            .map_err(|e| AgentError::Spawn(e.to_string()))?;
+
+        let answer = read_answer(&mut live.stdout, on_delta)?;
+        self.brief_sent = true;
+
+        let elapsed = started.elapsed();
+        tracing::info!(
+            model = %self.model,
+            cost_usd = answer.cost,
+            seconds = elapsed.as_secs_f32(),
+            "suggestion returned"
+        );
+        Ok(Suggestion {
+            text: answer.text,
+            cost_usd: answer.cost,
+            latency: elapsed,
+            model: self.model.clone(),
+        })
+    }
+
+    fn ensure_live(&mut self) -> Result<()> {
+        if self.live.is_some() {
+            return Ok(());
+        }
+        // Neutral directory, for the same reason as the one-shot path: `claude
+        // -p` inherits the working directory and will improvise an answer out
+        // of whatever repository it is standing in.
+        let mut child = Command::new(&self.binary)
+            .current_dir(std::env::temp_dir())
+            .arg("--print")
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--input-format")
+            .arg("stream-json")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--include-partial-messages")
+            .arg("--allowed-tools")
+            .arg("")
+            .arg("--append-system-prompt")
+            .arg(&self.system_prompt)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| AgentError::Spawn(e.to_string()))?;
+
+        // Drained for the life of the process. A full stderr pipe would block
+        // the child mid-answer, which is indistinguishable from a slow model.
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
+                    tracing::debug!(target: "claude", "{line}");
+                }
+            });
+        }
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AgentError::Spawn("no stdin on the claude process".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AgentError::Spawn("no stdout on the claude process".into()))?;
+
+        self.live = Some(Live {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        });
+        Ok(())
+    }
+}
+
+struct Answer {
+    text: String,
+    cost: f64,
+}
+
+/// Read events until one answer is complete.
+///
+/// Returns `Spawn` on end of stream, which is how a dead process reports
+/// itself here and is what tells [`Session::ask`] to restart and retry.
+fn read_answer(
+    reader: &mut impl BufRead,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<Answer> {
+    let mut streamed = String::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return Err(AgentError::Spawn("claude ended the stream".into())),
+            Ok(_) => {}
+            Err(e) => return Err(AgentError::Spawn(e.to_string())),
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("stream_event") => {
+                let inner = event.get("event");
+                let is_text_delta = inner
+                    .and_then(|e| e.get("delta"))
+                    .and_then(|d| d.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("text_delta");
+                if is_text_delta
+                    && let Some(text) = inner
+                        .and_then(|e| e.get("delta"))
+                        .and_then(|d| d.get("text"))
+                        .and_then(serde_json::Value::as_str)
+                {
+                    streamed.push_str(text);
+                    on_delta(&streamed);
+                }
+            }
+            Some("result") => {
+                let text = event.get("result").and_then(serde_json::Value::as_str);
+                if event
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return Err(AgentError::Cli(
+                        text.unwrap_or("claude reported an error with no detail")
+                            .to_string(),
+                    ));
+                }
+                let cost = event
+                    .get("total_cost_usd")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                let text = match text.map(str::trim) {
+                    Some(t) if !t.is_empty() => t.to_string(),
+                    _ if !streamed.trim().is_empty() => streamed.trim().to_string(),
+                    _ => return Err(AgentError::Parse("no text in the response".into())),
+                };
+                return Ok(Answer { text, cost });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    /// Proves the thing the whole `Session` type exists for: that the second
+    /// question is materially faster than the first, because it does not pay
+    /// for the process to start or for the CLI's preamble again.
+    ///
+    /// Ignored by default — it spends real money and needs a signed-in CLI.
+    /// Run it with `cargo test -p jay-agent -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "spends money and needs the claude CLI signed in"]
+    fn a_session_reuses_its_process_and_the_second_ask_is_faster() {
+        let claude = Claude::new(DEFAULT_MODEL).with_depth(crate::Depth::Hint);
+        let mut session = Session::new(&claude, Mode::Pairing);
+        let mut ignore = |_: &str| {};
+
+        let first = session
+            .ask("Reply with exactly one word: alpha", &[], None, &mut ignore)
+            .expect("first ask");
+        let second = session
+            .ask("Reply with exactly one word: beta", &[], None, &mut ignore)
+            .expect("second ask");
+
+        println!(
+            "  first  {:.1}s  ${:.4}\n  second {:.1}s  ${:.4}",
+            first.latency.as_secs_f32(),
+            first.cost_usd,
+            second.latency.as_secs_f32(),
+            second.cost_usd,
+        );
+        assert!(
+            second.latency < first.latency,
+            "the second ask ({:.1}s) should beat the first ({:.1}s); if it does \
+             not, the process is being respawned and Session is buying nothing",
+            second.latency.as_secs_f32(),
+            first.latency.as_secs_f32(),
+        );
     }
 }

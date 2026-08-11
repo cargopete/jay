@@ -428,3 +428,61 @@ microphone gets ember. **A warning light that is on during normal operation is
 not a warning light**, and the cost of getting this wrong is not a cosmetic
 one: it trains you to ignore the exact indicator that was added to catch a
 fault you had already lost an evening to.
+
+## One process per session, not one per question
+
+Every `claude -p` invocation pays about 4.7 seconds before it says anything:
+node startup, then ~29,000 tokens of the CLI's own preamble. Paid per press,
+that is most of the wait. It need not be paid per press.
+
+`--input-format stream-json` reads a *stream* of messages, so the process can
+be kept and asked again. Measured, including a 75 second idle gap between the
+two to match what a real session looks like:
+
+| | |
+| --- | --- |
+| First ask | 3.1s |
+| Second ask, same process | **1.7s** |
+
+The process survives idling, so this is not a trick that only works when the
+questions are queued up front. An ignored test in `claude.rs` asserts the
+second ask beats the first, because if the process is ever silently respawned
+the type is buying nothing and the tests should say so rather than the
+stopwatch.
+
+The second benefit has nothing to do with speed: the process keeps the
+conversation, so the third question of a round is asked of something that heard
+the first two. The brief is therefore sent with the first question only — after
+that it is in the history already, and repeating it every turn pays for it
+again. If the process dies the history dies with it, so the brief is re-armed
+and the question retried once.
+
+## Priming the transcriber is the cheapest accuracy available
+
+`small.en` heard "reverse a singly linked list" as "reverse the link please".
+jay answered correctly anyway, because the screenshot and the surrounding
+transcript carried what the words lost, but the same failure on the *problem
+statement* would poison everything downstream — and that is the one sentence
+spoken exactly once.
+
+whisper decodes conditioned on a prompt, so telling it which words to expect
+costs nothing and is set once per process. The default list covers two
+registers, because both turn up in the same sentence: the language of
+algorithmic interviews, and the language actually being worked in.
+`--vocab` appends the terms specific to a round. After priming, the same
+spoken sentence transcribes exactly, with no leakage of the prompt into the
+output.
+
+## jay is in its own screenshots
+
+The panel sits on the display jay captures, so the image contains jay's
+previous answer. Asked what was on screen, it once described its own last turn
+quoted back at it, which reads as a curiosity until you notice that mid-round
+the panel holds the *code jay suggested*. Mistaking that for the candidate's
+own work makes every "what have they got so far" judgement wrong in the same
+direction, and the whole `LATE_ARRIVAL` instruction depends on that judgement
+being right.
+
+Every question carrying a screenshot now says which part of the image is jay's
+own output. Capturing only the focused window would be stronger and is the
+better fix if this proves insufficient; a sentence is what it costs today.

@@ -211,6 +211,14 @@ enum Command {
         /// the sessions directory; every run is archived either way.
         #[arg(long)]
         save: Option<std::path::PathBuf>,
+        /// Extra words to expect, comma separated.
+        ///
+        /// Primes the transcriber. Names, product names and the jargon of this
+        /// particular round are worth adding: whisper decodes conditioned on
+        /// what it is told to expect, and the problem statement is the one
+        /// sentence spoken exactly once.
+        #[arg(long)]
+        vocab: Option<String>,
     },
 }
 
@@ -241,6 +249,7 @@ fn main() -> Result<()> {
             budget,
             brief,
             save,
+            vocab,
         } => transcribe(
             source,
             device.map(Into::into),
@@ -259,6 +268,7 @@ fn main() -> Result<()> {
                 None => None,
             },
             save,
+            vocab,
         ),
         Command::File { path, model } => transcribe_file(&path, model),
         Command::Brief { out, from, matches } => brief(&out, from.as_deref(), &matches),
@@ -375,6 +385,7 @@ fn transcribe(
     assist: Assist,
     brief: Option<String>,
     save: Option<std::path::PathBuf>,
+    vocab: Option<String>,
 ) -> Result<()> {
     // Everything downstream reads one line channel, so the terminal and the
     // overlay are just two consumers of the same stream rather than two paths
@@ -502,6 +513,7 @@ fn transcribe(
             None,
             brief,
             std::sync::Arc::new(jay_audio::Levels::default()),
+            vocab,
         );
         if let Some(handle) = saver {
             let _ = handle.join();
@@ -538,6 +550,7 @@ fn transcribe(
                 Some(request_rx),
                 brief,
                 levels,
+                vocab,
             ) {
                 tracing::error!(%e, "capture pipeline stopped");
                 let _ = complaints.send(jay_ui::Line::notice(format!(
@@ -639,6 +652,10 @@ fn spawn_assistant(
     std::thread::Builder::new()
         .name("jay-assist".into())
         .spawn(move || {
+            // One process for the whole session. The first press pays the
+            // ~4.7s spawn-and-preamble toll; every press after it pays about
+            // 1.2s, and each one is asked of something that heard the last.
+            let mut session = jay_agent::claude::Session::new(&claude, assist.mode);
             let mut spent = 0.0f64;
             for Ask {
                 question,
@@ -657,12 +674,11 @@ fn spawn_assistant(
                 // reads, and a repaint per token would spend more time drawing
                 // the answer than generating it.
                 let mut last_paint = Instant::now();
-                let outcome = claude.suggest_streaming(
-                    assist.mode,
+                let outcome = session.ask(
                     &question,
                     &context,
                     screenshot.as_deref(),
-                    |so_far| {
+                    &mut |so_far: &str| {
                         if last_paint.elapsed() >= PARTIAL_PAINT_INTERVAL {
                             last_paint = Instant::now();
                             let _ = lines.send(jay_ui::Line::partial(so_far.to_string()));
@@ -722,8 +738,13 @@ fn run_pipeline(
     requests: Option<crossbeam_channel::Receiver<jay_ui::Request>>,
     brief: Option<String>,
     levels: std::sync::Arc<jay_audio::Levels>,
+    vocab: Option<String>,
 ) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
+    if let Some(vocab) = &vocab {
+        // Commas are how a person writes a word list; whisper wants prose.
+        whisper.prime(&vocab.replace(',', " "));
+    }
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(512);
     let (utterance_tx, utterance_rx) = crossbeam_channel::bounded::<Utterance>(16);
