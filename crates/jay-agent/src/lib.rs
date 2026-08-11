@@ -34,6 +34,14 @@ impl Mode {
     ///
     /// Kept short deliberately. Every token here is paid on every call, and
     /// the models follow a brief instruction as well as a long one.
+    ///
+    /// Every prompt here is written around one measured fact: a suggestion
+    /// takes twelve to twenty seconds to arrive. By then the person has
+    /// already started answering. A tool that races them and loses is worse
+    /// than useless — it puts a competing paragraph in their eyeline mid
+    /// sentence. So jay is told, in every mode, not to restate what has
+    /// already been covered. Arriving late is only a problem if you were
+    /// trying to be first.
     pub fn system_prompt(self) -> &'static str {
         match self {
             Mode::Rehearsal => {
@@ -55,6 +63,13 @@ impl Mode {
         }
     }
 }
+
+/// Appended to every mode's prompt. See [`Mode::system_prompt`] for why.
+pub const LATE_ARRIVAL: &str = " You are always reading a conversation already \
+    in progress: by the time this reaches them they will have started \
+    answering. Read what they have already said and do not repeat it back. \
+    Give only what is missing, wrong, or worth adding. If they have covered it \
+    well, say so in one line and stop.";
 
 /// What came back, with what it cost.
 #[derive(Debug, Clone)]

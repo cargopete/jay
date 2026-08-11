@@ -98,7 +98,7 @@ impl Claude {
             .arg("--allowed-tools")
             .arg(if screenshot.is_some() { "Read" } else { "" })
             .arg("--append-system-prompt")
-            .arg(mode.system_prompt())
+            .arg(format!("{}{}", mode.system_prompt(), crate::LATE_ARRIVAL))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

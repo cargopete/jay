@@ -8,6 +8,16 @@
 //! hour warm, for a classifier answering yes or no.
 //!
 //! So the gate is rules, and the subscription pays only for the escalation.
+//!
+//! # What a real transcript taught this module
+//!
+//! The test corpus at the bottom is taken verbatim from a recorded interview
+//! where a commercial tool of this kind performed badly. It failed in one
+//! specific way, over and over: it treated every question as a question worth
+//! answering, and so kept producing help through three solid minutes of
+//! scheduling ("do you see the updated invitation?", "would you like to start
+//! earlier?"). Detecting a question is easy. Detecting a question *worth
+//! spending twelve seconds and twenty cents on* is the actual problem.
 
 /// Why jay decided to speak.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +42,24 @@ const INTERROGATIVES: &[&str] = &[
 /// Phrases that address jay directly.
 const WAKE_PHRASES: &[&str] = &["hey jay", "ok jay", "okay jay", "jay,"];
 
+/// Markers of a question about logistics, scheduling or the call itself.
+///
+/// Every one of these is drawn from a real transcript in which a tool of this
+/// kind kept offering technical help through the goodbyes. A question
+/// containing any of them is social or administrative, and answering it is
+/// worse than saying nothing: it costs money and it puts text in front of
+/// someone who is trying to agree a meeting time.
+const SMALL_TALK: &[&str] = &[
+    "invitation", "invite", "calendar", "reschedule", "schedule", "slot",
+    "earlier", "later today", "this hour", "one hour", "your time", "my time",
+    "see you", "hear me", "see my screen", "share my screen", "audio",
+    "sound ok", "thanks a lot", "have a great day", "enjoy the rest",
+    "feedback", "get back to you", "next week", "email",
+    // Confirmations about the call itself. Kept specific rather than matching
+    // a bare "today", which would swallow legitimate questions about work.
+    "another interview", "for today", "i assume we", "setup still",
+];
+
 /// Minimum words before a question is worth escalating.
 ///
 /// "What?" is a request for repetition, not a question worth an answer, and
@@ -47,6 +75,8 @@ pub fn classify(text: &str) -> Option<Trigger> {
         return None;
     }
 
+    // Being addressed by name outranks everything, including the small-talk
+    // filter: if you say jay's name, you meant it.
     if let Some(phrase) = WAKE_PHRASES
         .iter()
         .find(|phrase| normalised.starts_with(**phrase))
@@ -66,6 +96,10 @@ pub fn classify(text: &str) -> Option<Trigger> {
         return None;
     }
 
+    if is_small_talk(&normalised) {
+        return None;
+    }
+
     let ends_in_question_mark = normalised.ends_with('?');
     let opens_interrogatively = INTERROGATIVES
         .iter()
@@ -76,6 +110,11 @@ pub fn classify(text: &str) -> Option<Trigger> {
     }
 
     None
+}
+
+/// Is this about the meeting rather than about the subject of the meeting?
+fn is_small_talk(normalised: &str) -> bool {
+    SMALL_TALK.iter().any(|marker| normalised.contains(marker))
 }
 
 #[cfg(test)]
@@ -132,5 +171,47 @@ mod tests {
     fn ignores_empty_and_whitespace() {
         assert_eq!(classify(""), None);
         assert_eq!(classify("   "), None);
+    }
+
+    /// Verbatim from a real interview recording, in which a commercial tool of
+    /// this kind kept offering technical help throughout. Every line here is a
+    /// grammatical question and not one of them wants an answer from jay.
+    #[test]
+    fn declines_the_scheduling_chat_that_sank_the_competition() {
+        for line in [
+            "Do you see the updated invitation?",
+            "would you like, are you, like, committed to this particular hour \
+             or would you like to start, for example, earlier?",
+            "So we have one hour break?",
+            "if you can move it one your time, that would be, uh, two?",
+            "I assume we have another interview setup still for today, right?",
+        ] {
+            assert_eq!(classify(line), None, "should have declined: {line}");
+        }
+    }
+
+    /// From the same recording: the questions that genuinely wanted help.
+    #[test]
+    fn still_escalates_the_technical_questions_from_the_same_call() {
+        for line in [
+            "How would you handle authentication for the update endpoint?",
+            "What happens if the user isn't logged in at all?",
+            "Can you walk me through the space complexity of that approach?",
+        ] {
+            assert!(
+                matches!(classify(line), Some(Trigger::Question(_))),
+                "should have escalated: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn being_addressed_beats_the_small_talk_filter() {
+        // "schedule" is a small-talk marker, but if you say jay's name you
+        // meant to ask, and second-guessing that would be maddening.
+        assert!(matches!(
+            classify("hey jay, how should I schedule these workers?"),
+            Some(Trigger::Addressed(_))
+        ));
     }
 }

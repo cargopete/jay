@@ -89,6 +89,37 @@ The lesson generalises to every permission jay will ever want: it is not enough
 to be a signed bundle with the right usage descriptions, it has to be *started*
 as one.
 
+## What a real transcript changed
+
+A recording of two real interviews, in which a commercial tool of this kind
+helped badly, drove three changes. It is worth writing down what it got wrong,
+because the failures are not obvious from the outside.
+
+**It answered the scheduling.** Three minutes of "do you see the updated
+invitation?", "would you like to start earlier?", "I assume we have another
+interview setup still for today, right?" — every one a grammatical question,
+not one of them wanting help. Detecting a question is easy; detecting a
+question worth twelve seconds and twenty cents is the actual problem. Hence
+the small-talk filter in `jay-agent::gate`, whose test corpus is those exact
+lines, verbatim.
+
+**Its help arrived after the moment had passed.** In the second interview the
+candidate reasoned his own way to JWT-plus-ownership between 02:52 and 02:53;
+the polished answer landed at 02:53, after he had got there. That matches the
+measured 12–20s and it is not fixable by being cleverer. So every mode's prompt
+now carries [`LATE_ARRIVAL`]: read what has already been said, do not repeat it,
+give only what is missing. Arriving late is only a problem if you were trying
+to be first.
+
+**Replaying that moment through the new prompts** produced what the original
+missed: authentication and authorisation separated, ownership pushed into the
+`WHERE` clause so there is no read-then-write window, 404 rather than 403 so
+the response does not leak which codes are taken (the original tool
+specifically recommended 403), and a flag that the interviewer will ask about
+anonymous creation next. `jay ask --context <file>` exists so any recorded
+transcript can be replayed through the real prompt path, which is the only
+honest way to tell whether a prompt change helped.
+
 ## No capture exclusion, deliberately
 
 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` on Windows and

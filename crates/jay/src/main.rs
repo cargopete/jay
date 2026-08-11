@@ -101,6 +101,13 @@ enum Command {
         /// Model for the reasoning step.
         #[arg(long, default_value = jay_agent::claude::DEFAULT_MODEL)]
         model: String,
+        /// Read the surrounding conversation from a file, one line per turn.
+        ///
+        /// Lets a recorded transcript be replayed through the real prompt
+        /// path, which is the only honest way to tell whether a change to the
+        /// prompts actually helps.
+        #[arg(long)]
+        context: Option<std::path::PathBuf>,
         /// Also send what is on screen right now.
         ///
         /// Captures the focused window at the moment of asking, not
@@ -198,8 +205,9 @@ fn main() -> Result<()> {
             question,
             mode,
             model,
+            context,
             screen,
-        } => ask(&question, mode.into(), &model, screen),
+        } => ask(&question, mode.into(), &model, context.as_deref(), screen),
     }
 }
 
@@ -743,7 +751,13 @@ fn run_pipeline(
 }
 
 /// One-shot suggestion, no audio involved.
-fn ask(question: &str, mode: jay_agent::Mode, model: &str, screen: bool) -> Result<()> {
+fn ask(
+    question: &str,
+    mode: jay_agent::Mode,
+    model: &str,
+    context: Option<&std::path::Path>,
+    screen: bool,
+) -> Result<()> {
     // The gate runs first even here, so the thing being demonstrated is the
     // actual decision path and not a shortcut around it.
     let Some(trigger) = jay_agent::gate::classify(question) else {
@@ -771,8 +785,18 @@ fn ask(question: &str, mode: jay_agent::Mode, model: &str, screen: bool) -> Resu
         None
     };
 
+    let history: Vec<String> = match context {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+
     let suggestion = jay_agent::claude::Claude::new(model)
-        .suggest_with(mode, asked, &[], shot.as_deref())
+        .suggest_with(mode, asked, &history, shot.as_deref())
         .context("asking claude");
 
     // The screenshot is somebody's work in progress. It does not linger.
