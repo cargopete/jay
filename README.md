@@ -237,6 +237,11 @@ round trip — measured at about four seconds, the same as the entire spawn and
 preamble floor — spent fetching a file jay already had in hand. It also means
 no tools need be enabled at all.
 
+**The press drains first.** Pulling the lever closes whatever sentence is
+mid-flight and waits, up to 1.5s, for it to be transcribed before reading the
+conversation. Without that, the sentence least likely to be in the transcript
+is the one just spoken, which is the one being asked about.
+
 **Streaming.** The answer is painted as it is written. Total time is unchanged;
 the first words land at about five seconds instead of the whole thing at
 fourteen, and five seconds into a conversation you can still use what you

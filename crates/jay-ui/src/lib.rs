@@ -287,6 +287,36 @@ impl Overlay {
         response.clicked() && !active
     }
 
+    /// Draw an answer, with its code in a well cut into the plate.
+    fn draw_answer(ui: &mut egui::Ui, text: &str) {
+        for block in split_blocks(text) {
+            match block {
+                Block::Prose(prose) => {
+                    ui.label(
+                        egui::RichText::new(plain(prose)).size(BODY).color(INK),
+                    );
+                    ui.add_space(4.0);
+                }
+                Block::Code(code) => {
+                    egui::Frame::new()
+                        .fill(INSET)
+                        .stroke(egui::Stroke::new(1.0, SEAM))
+                        .inner_margin(8.0)
+                        .corner_radius(2.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(code)
+                                    .size(CODE)
+                                    .family(egui::FontFamily::Monospace)
+                                    .color(BRASS_HI),
+                            );
+                        });
+                    ui.add_space(5.0);
+                }
+            }
+        }
+    }
+
     /// The switch bank: which round the lever is answering for, and whether it
     /// hands over the answer or a nudge.
     fn draw_switches(&mut self, ui: &mut egui::Ui) {
@@ -460,6 +490,65 @@ const LABEL: f32 = 11.0;
 const HEADING: f32 = 13.0;
 /// The nameplate.
 const NAMEPLATE: f32 = 16.0;
+/// Code in a reading. A shade under the body, because a line of Rust is longer
+/// than a line of prose and wrapping code is worse than reading it small.
+const CODE: f32 = 14.0;
+
+/// A run of the answer, split so code can be drawn as code.
+#[derive(Debug, PartialEq, Eq)]
+enum Block<'a> {
+    Prose(&'a str),
+    Code(&'a str),
+}
+
+/// Split an answer on fenced code blocks.
+///
+/// The model returns markdown and the panel renders none of it, so before this
+/// a coding answer arrived with its fences and asterisks intact — read at a
+/// glance, mid-sentence, with somebody waiting. Code is the thing you are
+/// looking for in that panel and it should be the thing your eye lands on.
+fn split_blocks(text: &str) -> Vec<Block<'_>> {
+    let mut blocks = Vec::new();
+    let mut rest = text;
+
+    while let Some(open) = rest.find("```") {
+        let (before, after) = rest.split_at(open);
+        if !before.trim().is_empty() {
+            blocks.push(Block::Prose(before.trim_matches('\n')));
+        }
+        // Skip the fence and its language tag.
+        let after = &after[3..];
+        let body = match after.find('\n') {
+            Some(nl) => &after[nl + 1..],
+            None => "",
+        };
+        match body.find("```") {
+            Some(close) => {
+                blocks.push(Block::Code(body[..close].trim_end_matches('\n')));
+                rest = &body[close + 3..];
+            }
+            // An unterminated fence: everything left is code. Happens on every
+            // partial, since the answer is drawn while it is still being
+            // written and the closing fence has not arrived yet.
+            None => {
+                if !body.trim().is_empty() {
+                    blocks.push(Block::Code(body.trim_end_matches('\n')));
+                }
+                return blocks;
+            }
+        }
+    }
+
+    if !rest.trim().is_empty() {
+        blocks.push(Block::Prose(rest.trim_matches('\n')));
+    }
+    blocks
+}
+
+/// Strip the markdown emphasis nothing here renders.
+fn plain(text: &str) -> String {
+    text.replace("**", "")
+}
 
 /// A tracked uppercase label, the way a stencil does it.
 fn stencil(text: &str) -> egui::RichText {
@@ -667,11 +756,7 @@ impl eframe::App for Overlay {
                                             );
                                         });
                                         ui.add_space(3.0);
-                                        ui.label(
-                                            egui::RichText::new(&line.text)
-                                                .size(BODY)
-                                                .color(INK),
-                                        );
+                                        Self::draw_answer(ui, &line.text);
                                     });
                                 ui.add_space(6.0);
                             }
@@ -716,9 +801,7 @@ impl eframe::App for Overlay {
                                     );
                                 });
                                 ui.add_space(3.0);
-                                ui.label(
-                                    egui::RichText::new(partial).size(BODY).color(INK),
-                                );
+                                Self::draw_answer(ui, partial);
                             });
                         ui.add_space(6.0);
                     }
@@ -742,5 +825,53 @@ fn speaker_colour(speaker: &str) -> egui::Color32 {
         "you" => BRASS,
         "jay" => BRASS_HI,
         _ => COPPER,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_splits_into_prose_and_code() {
+        let answer = "**Approach:** walk it once.\n\n```rust\nfn f() {}\n```\n\nO(n) time.";
+        assert_eq!(
+            split_blocks(answer),
+            vec![
+                Block::Prose("**Approach:** walk it once."),
+                Block::Code("fn f() {}"),
+                Block::Prose("O(n) time."),
+            ]
+        );
+    }
+
+    /// Every partial is an unterminated fence, because the panel draws the
+    /// answer while it is still being written. If this returned nothing, the
+    /// code would appear only at the very end, which is the opposite of what
+    /// streaming is for.
+    #[test]
+    fn a_half_written_code_block_still_draws() {
+        let partial = "Approach: walk it.\n\n```rust\nfn f() {\n    let mut prev";
+        assert_eq!(
+            split_blocks(partial),
+            vec![
+                Block::Prose("Approach: walk it."),
+                Block::Code("fn f() {\n    let mut prev"),
+            ]
+        );
+    }
+
+    #[test]
+    fn prose_without_code_is_left_alone() {
+        assert_eq!(
+            split_blocks("Just say the thing."),
+            vec![Block::Prose("Just say the thing.")]
+        );
+        assert_eq!(split_blocks(""), vec![]);
+    }
+
+    #[test]
+    fn emphasis_markers_do_not_reach_the_panel() {
+        assert_eq!(plain("**Approach:** walk it"), "Approach: walk it");
     }
 }

@@ -4,6 +4,7 @@
 //! transcript, the overlay and the agent all come later, and none of them are
 //! worth building on a capture path nobody has watched produce a number.
 
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -626,6 +627,41 @@ struct Assist {
     budget_usd: Option<f64>,
 }
 
+/// Decrements the in-flight count however the loop body exits.
+///
+/// There are five `continue`s in that loop and each one is an utterance that
+/// will never reach the transcript. A press waiting on the count must not wait
+/// for those, and a guard is the only way to be sure a branch added later does
+/// not quietly leak one.
+struct Departing<'a>(&'a Drain);
+
+impl Drop for Departing<'_> {
+    fn drop(&mut self) {
+        self.0
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Coordination between the lever and the capture loop.
+///
+/// `flush` is raised by the press and lowered by the capture loop once it has
+/// closed its segmenters. `in_flight` counts utterances that have been queued
+/// for transcription but have not yet reached the transcript.
+#[derive(Debug, Default)]
+struct DrainState {
+    flush: std::sync::atomic::AtomicBool,
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+type Drain = std::sync::Arc<DrainState>;
+
+/// Longest a press will wait for speech already spoken to be transcribed.
+///
+/// Spent only when there is something to wait for. A second of latency to
+/// answer the right question beats none to answer the previous one.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// A question plus the conversation around it.
 ///
 /// Sending the surrounding lines is the single biggest lever on suggestion
@@ -798,6 +834,17 @@ fn run_pipeline(
     ));
     let problem: PinnedProblem = std::sync::Arc::new(std::sync::Mutex::new(None));
 
+    // Pressing the lever asks the capture loop to close whatever utterance is
+    // open, and the hand-ask thread then waits for the backlog to clear before
+    // reading the transcript.
+    //
+    // The reason is a timing accident that would otherwise bite at the worst
+    // moment: an utterance is not emitted until 600 ms of silence have passed,
+    // and whisper takes another half second on top. So the sentence most
+    // likely to be missing from the transcript is the one just spoken, which
+    // is precisely the one being asked about.
+    let drain: Drain = std::sync::Arc::new(DrainState::default());
+
     // jay never volunteers. Suggestions happen when you press the button and
     // at no other time: nothing is spent that you did not ask for, there are no
     // false positives to tune away, and a panel that only speaks when spoken to
@@ -840,6 +887,7 @@ fn run_pipeline(
     // is almost always the thing being discussed.
     if let (Some(tx), Some(rx)) = (question_tx.clone(), requests) {
         let settings_mode = settings.mode;
+        let drain = std::sync::Arc::clone(&drain);
         let history = std::sync::Arc::clone(&history);
         let problem = std::sync::Arc::clone(&problem);
         let lines = lines.clone();
@@ -868,6 +916,18 @@ fn run_pipeline(
                         }
                         jay_ui::Request::Suggest => {}
                     }
+
+                    // Close anything mid-sentence and let the backlog clear,
+                    // so the question being asked about is actually in the
+                    // transcript by the time it is read.
+                    drain.flush.store(true, Relaxed);
+                    let waiting_since = Instant::now();
+                    while drain.in_flight.load(Relaxed) > 0
+                        && waiting_since.elapsed() < DRAIN_TIMEOUT
+                    {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+
                     let context = with_problem(&problem, &history);
 
                     let screenshot = match jay_agent::screen::capture(
@@ -932,8 +992,12 @@ fn run_pipeline(
         .spawn({
             let history = std::sync::Arc::clone(&history);
             let problem = std::sync::Arc::clone(&problem);
+            let drain = std::sync::Arc::clone(&drain);
             move || {
             for utterance in utterance_rx {
+                // Whatever happens below — transcribed, filtered, or failed —
+                // this one is no longer something a press should wait for.
+                let _leaving = Departing(&drain);
                 let spoken = utterance.duration();
                 let result = match whisper.transcribe(&utterance.samples) {
                     Ok(t) => t,
@@ -1048,17 +1112,38 @@ fn run_pipeline(
         };
         let utterance = segmenter.push(&frame);
         meter.set_speaking(segmenter.is_speaking());
+
+        // A press asks for whatever is mid-sentence, now, rather than after
+        // the VAD's 600 ms of silence has elapsed.
+        if drain.flush.swap(false, Relaxed) {
+            for pending in [mic_segmenter.flush(), system_segmenter.flush()]
+                .into_iter()
+                .flatten()
+            {
+                drain.in_flight.fetch_add(1, Relaxed);
+                if utterance_tx.try_send(pending).is_err() {
+                    drain.in_flight.fetch_sub(1, Relaxed);
+                    skipped_utterances += 1;
+                }
+            }
+        }
+
         if let Some(utterance) = utterance {
             // Same rule one layer up: whisper is slower than speech in the
             // worst case, and a stalled capture loop loses audio outright,
             // whereas a skipped utterance loses one sentence and says so.
+            drain.in_flight.fetch_add(1, Relaxed);
             match utterance_tx.try_send(utterance) {
                 Ok(()) => {}
                 Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    drain.in_flight.fetch_sub(1, Relaxed);
                     skipped_utterances += 1;
                     tracing::warn!("transcription is behind; dropped an utterance");
                 }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    drain.in_flight.fetch_sub(1, Relaxed);
+                    break;
+                }
             }
         }
     }
@@ -1468,4 +1553,47 @@ fn listen(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The transcription loop has five `continue`s, and every one of them is
+    /// an utterance that will never reach the transcript. A press waiting on
+    /// the backlog must not wait for those. This asserts the guard covers
+    /// every exit path, including ones added later.
+    #[test]
+    fn every_utterance_leaves_the_backlog_however_the_loop_exits() {
+        let drain: Drain = std::sync::Arc::new(DrainState::default());
+        drain.in_flight.fetch_add(4, Relaxed);
+
+        for reason in 0..4 {
+            let _leaving = Departing(&drain);
+            match reason {
+                0 => continue,          // filtered as an artefact
+                1 => continue,          // dropped as too quiet
+                2 => {}                 // transcribed normally
+                _ => continue,          // whichever branch comes next
+            }
+        }
+
+        assert_eq!(
+            drain.in_flight.load(Relaxed),
+            0,
+            "a press would wait {}ms for utterances that are never coming",
+            DRAIN_TIMEOUT.as_millis()
+        );
+    }
+
+    /// A press with nothing in flight must not pay the drain timeout.
+    #[test]
+    fn an_empty_backlog_costs_a_press_nothing() {
+        let drain: Drain = std::sync::Arc::new(DrainState::default());
+        let started = Instant::now();
+        while drain.in_flight.load(Relaxed) > 0 && started.elapsed() < DRAIN_TIMEOUT {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
 }

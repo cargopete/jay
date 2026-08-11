@@ -517,3 +517,42 @@ Two tests hold this together: every mode must appear in `Mode::ALL`, or it
 would simply be unreachable from the panel and nothing would say so; and the
 switch positions must produce genuinely different system prompts, or throwing
 one would cost 4.7 seconds and buy nothing.
+
+## The press drains what is still in the segmenter
+
+An utterance is not emitted until 600 ms of silence have passed, and whisper
+takes another half second on top. So at the moment the lever is pulled, the
+sentence least likely to be in the transcript is the one just spoken — which is
+precisely the one being asked about. jay would answer the previous question,
+confidently, having genuinely never heard the current one.
+
+Pressing now raises a flag the capture loop honours on its next frame: both
+segmenters are flushed, whatever was mid-sentence is queued, and the hand-ask
+thread waits for the backlog to clear before reading the transcript. The wait
+is capped at 1.5s and is only ever paid when there is something to wait for.
+
+The fiddly part is knowing when the backlog *is* clear. The transcription loop
+has five `continue`s — a failed inference, an artefact, audio too quiet, and so
+on — and every one is an utterance that will never reach the transcript. A
+press waiting on a count that those never decrement would sit out the full
+timeout every time. Hence a drop guard rather than a decrement at the end of
+the loop body, and a test that exercises the branches, so a `continue` added
+later cannot quietly reintroduce it.
+
+## Markdown that nothing renders
+
+The model returns markdown. The panel renders none of it, so a coding answer
+arrived with its fences and its asterisks intact, as one flat block of text —
+read at a glance, mid-sentence, with somebody waiting.
+
+Answers are now split on fenced code blocks and the code is drawn in a well cut
+into the plate: `--inset` ground, hairline border, `--brass-hi`, a shade smaller
+than the body because a line of Rust is longer than a line of prose and
+wrapping code is worse than reading it small. Emphasis markers are stripped
+rather than rendered.
+
+The case that matters most is the unterminated fence, because **every partial
+is one**: the panel draws the answer while it is still being written, so the
+closing fence has not arrived yet. Treating that as "no code block" would show
+the code only once the answer was complete, which is precisely what streaming
+exists to avoid. A test covers it.
