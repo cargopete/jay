@@ -12,6 +12,7 @@ use std::time::Instant;
 
 pub mod mic;
 pub mod resample;
+pub mod vad;
 
 #[cfg(target_os = "macos")]
 pub mod system;
@@ -19,9 +20,16 @@ pub mod system;
 /// Sample rate every source resamples to before leaving this crate.
 pub const SAMPLE_RATE: u32 = 16_000;
 
-/// Samples per frame handed downstream. 20 ms at 16 kHz, which is the frame
-/// size Silero VAD is happiest with and small enough to keep latency honest.
-pub const FRAME_SAMPLES: usize = 320;
+/// Samples per frame handed downstream. 32 ms at 16 kHz.
+///
+/// Not a free choice: Silero v5 accepts exactly 512 samples at 16 kHz and
+/// rejects anything else, so the whole pipeline is framed to suit the VAD
+/// rather than the other way round.
+pub const FRAME_SAMPLES: usize = 512;
+
+/// Frame duration implied by [`FRAME_SAMPLES`] at [`SAMPLE_RATE`].
+pub const FRAME_DURATION: std::time::Duration =
+    std::time::Duration::from_nanos((FRAME_SAMPLES as u64 * 1_000_000_000) / SAMPLE_RATE as u64);
 
 /// Which side of the conversation a frame came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +82,8 @@ pub enum AudioError {
     Resample(#[from] rubato::ResampleError),
     #[error("resampler could not be constructed: {0}")]
     ResamplerConstruction(#[from] rubato::ResamplerConstructionError),
+    #[error("voice activity detector: {0}")]
+    Vad(String),
     #[error(transparent)]
     Cpal(#[from] anyhow::Error),
 }

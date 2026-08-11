@@ -12,3 +12,4 @@ ringbuf = "0.5.1"
 rubato = "5.0.0"
 thiserror.workspace = true
 tracing.workspace = true
+voice_activity_detector = "0.2.1"
