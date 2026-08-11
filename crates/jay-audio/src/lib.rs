@@ -84,6 +84,8 @@ pub enum AudioError {
     ResamplerConstruction(#[from] rubato::ResamplerConstructionError),
     #[error("voice activity detector: {0}")]
     Vad(String),
+    #[error("system audio tap: {0}")]
+    SystemTap(String),
     #[error(transparent)]
     Cpal(#[from] anyhow::Error),
 }

@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use jay_audio::vad::{SpeechSegmenter, Utterance};
 use jay_audio::{Channel, Frame, SAMPLE_RATE, mic};
 use jay_stt::models::Model;
@@ -21,6 +21,27 @@ struct Cli {
     command: Command,
 }
 
+/// Which capture paths to run.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Source {
+    /// The microphone only. You.
+    Mic,
+    /// System output only. Whoever else is talking.
+    System,
+    /// Both, kept on separate channels.
+    Both,
+}
+
+impl Source {
+    fn uses_mic(self) -> bool {
+        matches!(self, Source::Mic | Source::Both)
+    }
+
+    fn uses_system(self) -> bool {
+        matches!(self, Source::System | Source::Both)
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List the audio input devices jay can see.
@@ -30,6 +51,9 @@ enum Command {
     /// A smoke test for the capture path: if the levels move when you speak
     /// and the dropped-sample count stays at zero, the pipeline is sound.
     Listen {
+        /// Which audio to listen to.
+        #[arg(short = 'S', long, value_enum, default_value_t = Source::Mic)]
+        source: Source,
         /// Input device name. Defaults to the system default input.
         #[arg(short, long)]
         device: Option<String>,
@@ -48,8 +72,11 @@ enum Command {
         #[arg(short, long, default_value = "base")]
         model: Model,
     },
-    /// Transcribe speech from the microphone, live.
+    /// Transcribe speech live, from the microphone and/or system audio.
     Transcribe {
+        /// Which audio to listen to.
+        #[arg(short = 'S', long, value_enum, default_value_t = Source::Mic)]
+        source: Source,
         /// Input device name. Defaults to the system default input.
         #[arg(short, long)]
         device: Option<String>,
@@ -73,12 +100,17 @@ fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Devices => devices(),
-        Command::Listen { device, seconds } => listen(device.as_deref(), seconds),
+        Command::Listen {
+            source,
+            device,
+            seconds,
+        } => listen(source, device.as_deref(), seconds),
         Command::Transcribe {
+            source,
             device,
             model,
             seconds,
-        } => transcribe(device.as_deref(), model, seconds),
+        } => transcribe(source, device.as_deref(), model, seconds),
         Command::File { path, model } => transcribe_file(&path, model),
     }
 }
@@ -165,13 +197,30 @@ fn transcribe_file(path: &std::path::Path, model: Model) -> Result<()> {
 /// Whisper runs on its own thread. An utterance can be twenty seconds long and
 /// take a second or two to decode, and blocking the capture loop on that would
 /// back the frame channel up and start dropping audio.
-fn transcribe(device: Option<&str>, model: Model, seconds: u64) -> Result<()> {
+fn transcribe(source: Source, device: Option<&str>, model: Model, seconds: u64) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(512);
     let (utterance_tx, utterance_rx) = crossbeam_channel::bounded::<Utterance>(16);
 
-    let capture = mic::start(device, frame_tx).context("starting microphone capture")?;
+    // Both captures feed the one frame channel; the channel tag on each frame
+    // is what keeps the two speakers apart downstream.
+    let _mic = if source.uses_mic() {
+        Some(mic::start(device, frame_tx.clone()).context("starting microphone capture")?)
+    } else {
+        None
+    };
+
+    let _system = if source.uses_system() {
+        Some(jay_audio::system::start(frame_tx.clone()).context(
+            "starting the system audio tap. macOS asks for permission the first \
+             time; if it was refused, grant it in System Settings > Privacy & \
+             Security > Screen & System Audio Recording",
+        )?)
+    } else {
+        None
+    };
+    drop(frame_tx);
 
     let worker = std::thread::Builder::new()
         .name("jay-stt".into())
@@ -206,15 +255,23 @@ fn transcribe(device: Option<&str>, model: Model, seconds: u64) -> Result<()> {
         })
         .context("spawning the transcription thread")?;
 
-    let mut segmenter = SpeechSegmenter::new(Channel::Mic)?;
+    // One segmenter per channel. The VAD carries recurrent state, so running
+    // two speakers through a single instance would corrupt both.
+    let mut mic_segmenter = SpeechSegmenter::new(Channel::Mic)?;
+    let mut system_segmenter = SpeechSegmenter::new(Channel::System)?;
+
     let started = Instant::now();
     let unlimited = seconds == 0;
 
-    println!("transcribing with {model}. Speak.\n");
+    println!("transcribing {source:?} audio with {model}.\n");
 
     while unlimited || started.elapsed() < Duration::from_secs(seconds) {
         let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(200)) else {
             continue;
+        };
+        let segmenter = match frame.channel {
+            Channel::Mic => &mut mic_segmenter,
+            Channel::System => &mut system_segmenter,
         };
         if let Some(utterance) = segmenter.push(&frame)
             && utterance_tx.send(utterance).is_err()
@@ -224,13 +281,25 @@ fn transcribe(device: Option<&str>, model: Model, seconds: u64) -> Result<()> {
     }
 
     // Whatever was mid-sentence when time ran out is still worth having.
-    if let Some(tail) = segmenter.flush() {
+    for tail in [mic_segmenter.flush(), system_segmenter.flush()]
+        .into_iter()
+        .flatten()
+    {
         let _ = utterance_tx.send(tail);
     }
     drop(utterance_tx);
     let _ = worker.join();
 
-    println!("\ndropped samples: {}", capture.dropped_samples());
+    if let Some(capture) = &_mic {
+        println!("\nmic dropped samples: {}", capture.dropped_samples());
+    }
+    if let Some(capture) = &_system {
+        println!(
+            "system tap: {} Hz, dropped samples: {}",
+            capture.device_sample_rate(),
+            capture.dropped_samples()
+        );
+    }
     Ok(())
 }
 
@@ -247,9 +316,20 @@ fn devices() -> Result<()> {
     Ok(())
 }
 
-fn listen(device: Option<&str>, seconds: u64) -> Result<()> {
+fn listen(source: Source, device: Option<&str>, seconds: u64) -> Result<()> {
     let (tx, rx) = crossbeam_channel::bounded::<Frame>(512);
-    let capture = mic::start(device, tx).context("starting microphone capture")?;
+
+    let mic_capture = if source.uses_mic() {
+        Some(mic::start(device, tx.clone()).context("starting microphone capture")?)
+    } else {
+        None
+    };
+    let system_capture = if source.uses_system() {
+        Some(jay_audio::system::start(tx.clone()).context("starting the system audio tap")?)
+    } else {
+        None
+    };
+    drop(tx);
 
     let started = Instant::now();
     let deadline = Duration::from_secs(seconds);
@@ -264,8 +344,6 @@ fn listen(device: Option<&str>, seconds: u64) -> Result<()> {
         let Ok(frame) = rx.recv_timeout(Duration::from_millis(500)) else {
             continue;
         };
-        debug_assert_eq!(frame.channel, Channel::Mic);
-
         frames += 1;
         let rms = frame.rms();
         peak_rms = peak_rms.max(rms);
@@ -274,7 +352,7 @@ fn listen(device: Option<&str>, seconds: u64) -> Result<()> {
         if last_report.elapsed() >= Duration::from_millis(500) {
             last_report = Instant::now();
             let bar = "#".repeat(((rms * 200.0) as usize).min(40));
-            println!("  rms {rms:>7.5}  {bar}");
+            println!("  [{}] rms {rms:>7.5}  {bar}", frame.channel.label());
         }
     }
 
@@ -283,7 +361,16 @@ fn listen(device: Option<&str>, seconds: u64) -> Result<()> {
     println!("frames delivered : {frames} (expected roughly {expected})");
     println!("peak rms         : {peak_rms:.5}");
     println!("worst queue lag  : {worst_lag:?}");
-    println!("dropped samples  : {}", capture.dropped_samples());
+    if let Some(capture) = &mic_capture {
+        println!("mic dropped      : {}", capture.dropped_samples());
+    }
+    if let Some(capture) = &system_capture {
+        println!(
+            "system tap       : {} Hz, dropped {}",
+            capture.device_sample_rate(),
+            capture.dropped_samples()
+        );
+    }
 
     // Digital silence looks exactly like a working pipeline pointed at a muted
     // device, so say so rather than let a tidy frame count imply success.

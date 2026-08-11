@@ -57,6 +57,39 @@ tap a named process, and does not drag in the screen-recording permission the
 way `SCStream` does. This machine runs 26.5.1, so it is available. Both routes
 need an FFI shim; the tap route asks the user for less.
 
+## The system tap runs and returns silence (open)
+
+Current state, recorded so it is not rediscovered from scratch.
+
+The tap starts, reports 48 kHz, and its IOProc fires steadily: 276 frames in
+ten seconds with a 4 ms queue lag and zero drops. Every sample is zero, during
+playback that is plainly audible from the speakers.
+
+Ruled out so far:
+
+- **Not a missing clock.** Adding the default output device as
+  `kAudioAggregateDeviceMainSubDeviceKey` and to the sub-device list changed
+  nothing. The IOProc was firing before that fix and after it.
+- **Not the plain-binary Info.plist.** Wrapping the binary in a signed `.app`
+  with `NSAudioCaptureUsageDescription` (see `scripts/bundle.sh`) also changed
+  nothing.
+
+What the evidence points at: `tccutil reset AudioCapture dev.cargopete.jay`
+succeeds, so macOS does track an `AudioCapture` grant for the bundle. But
+`log show --predicate 'subsystem == "com.apple.TCC"'` shows **no request from
+jay at all**. The process is never asking, so it is never prompted, and an
+unauthorised tap is fed silence rather than an error.
+
+The likely cause is TCC responsibility attribution: a binary launched from a
+shell inherits the responsible process of whatever owns that shell, so the
+grant would have to belong to the terminal rather than to jay. The next things
+to try are launching via `open -a` so LaunchServices gives the app its own
+identity, and granting audio recording to the terminal directly.
+
+Worth noting for the design: a tap that returns silence looks exactly like a
+quiet room. The `listen` command reports peak RMS and shouts when every frame
+is zero precisely so this class of failure cannot masquerade as success.
+
 ## No capture exclusion, deliberately
 
 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` on Windows and
