@@ -129,6 +129,13 @@ enum Command {
         #[arg(long)]
         screen: bool,
     },
+    /// Open the panel with sample content and no audio.
+    ///
+    /// The panel is the one part of jay with no other way to check it. The
+    /// tests can assert that an answer splits into prose and code; they cannot
+    /// tell you the switch bank came out reading "NUDGE ANSWER GIVES", which
+    /// is a thing that shipped and was obvious the moment somebody looked.
+    Demo,
     /// Check everything jay needs before a session.
     ///
     /// Run this once from the .app bundle before you sit down. Permissions on
@@ -233,6 +240,7 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
+        Command::Demo => demo(),
         Command::Devices => devices(),
         Command::Listen {
             source,
@@ -253,7 +261,7 @@ fn main() -> Result<()> {
             vocab,
         } => transcribe(
             source,
-            device.map(Into::into),
+            device,
             model,
             seconds,
             overlay,
@@ -786,6 +794,10 @@ fn spawn_assistant(
         .context("spawning the assistant")
 }
 
+// Ten arguments, all of them separate decisions made at the call site. They
+// were briefly a struct, which moved the list somewhere else without shortening
+// it.
+#[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     source: Source,
     device: Option<&str>,
@@ -1280,6 +1292,103 @@ fn drain(rx: &crossbeam_channel::Receiver<Frame>, window: Duration) -> (u64, f32
     }
     (frames, peak)
 }
+
+/// Open the panel with one of everything in it.
+///
+/// No capture, no model, no spending. Meters are driven by a thread writing
+/// plausible levels so the four states can be seen rather than reasoned about.
+fn demo() -> Result<()> {
+    let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
+    let (request_tx, request_rx) = crossbeam_channel::bounded::<jay_ui::Request>(8);
+    let levels = std::sync::Arc::new(jay_audio::Levels::default());
+
+    // Drain requests so the lever and the switches do not block on a full
+    // channel, and report them, since this is also how the switches get
+    // checked without a session.
+    std::thread::spawn(move || {
+        for request in request_rx {
+            println!("  panel sent {request:?}");
+        }
+    });
+
+    // Plausible levels: the microphone alive and speaking, the tap alive and
+    // silent, which is what a headphoned session looks like between questions.
+    std::thread::spawn({
+        let levels = std::sync::Arc::clone(&levels);
+        move || {
+            let mut tick = 0.0f32;
+            loop {
+                tick += 0.12;
+                levels.mic.record(0.06 + 0.05 * tick.sin().abs());
+                levels.mic.set_speaking(tick.sin() > 0.0);
+                levels.system.record(0.0015);
+                levels.system.set_speaking(false);
+                std::thread::sleep(Duration::from_millis(32));
+            }
+        }
+    });
+
+    for line in [
+        jay_ui::Line::notice(
+            "ready in Coding mode. I will not say anything until you press ask jay."
+                .to_string(),
+        ),
+        jay_ui::Line::transcript(
+            "them",
+            "Given a two-dimensional grid of ones and zeros, find the maximum \
+             area of an island.",
+            Duration::from_millis(2400),
+        ),
+        jay_ui::Line::transcript(
+            "you",
+            "Okay. So it's connected components. I think flood fill.",
+            Duration::from_millis(1900),
+        ),
+        jay_ui::Line::notice("dropped a known whisper artefact".to_string()),
+        jay_ui::Line::transcript(
+            "them",
+            "How are you going to avoid counting the same island twice?",
+            Duration::from_millis(2100),
+        ),
+        jay_ui::Line::suggestion(DEMO_ANSWER.to_string(), Duration::from_secs(10)),
+        jay_ui::Line::notice("10.3s · $0.196 · $0.20 this session".to_string()),
+    ] {
+        let _ = line_tx.send(line);
+    }
+
+    jay_ui::run(
+        line_rx,
+        request_tx,
+        "medium.en".to_string(),
+        jay_agent::Mode::Coding,
+        jay_agent::Depth::default(),
+        levels,
+        [true, true],
+    )
+    .map_err(|e| anyhow::anyhow!("overlay: {e}"))
+}
+
+/// A real answer, verbatim, so the panel is checked against what it will
+/// actually be asked to draw rather than against a convenient short string.
+const DEMO_ANSWER: &str = r#"**Approach:** a `visited` grid, or mutate the input in place: when you count a cell, zero it out so it can never be reached again.
+
+```rust
+fn max_area_of_island(mut grid: Vec<Vec<i32>>) -> i32 {
+    let mut best = 0;
+    for r in 0..grid.len() {
+        for c in 0..grid[0].len() {
+            best = best.max(fill(&mut grid, r as i32, c as i32));
+        }
+    }
+    best
+}
+```
+
+**Complexity:** O(rows x cols) time, O(rows x cols) stack in the worst case.
+
+- Empty grid: `grid[0]` panics, guard with `if grid.is_empty()`.
+- All water: every fill returns 0, so `best` stays 0.
+- A snaking island fills the grid: recursion depth equals the cell count."#;
 
 fn check(out: &std::path::Path) -> Result<()> {
     use std::fmt::Write as _;

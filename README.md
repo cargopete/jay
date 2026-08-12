@@ -88,6 +88,13 @@ open -n -a ~/Projects/jay/target/release/jay.app --args \
 A small dark panel appears above everything, draggable by its header. Talk.
 Press **ask jay** when you want the answer. Close it with **×**.
 
+It is in two halves. The **reading** holds the top and stays where you put it,
+starting at the beginning of each new answer. The **conversation** runs along
+the bottom and chases itself. They were one pane until it became clear that the
+"Approach:" line — the sentence you are meant to say out loud first — had
+scrolled off the top by the time the code finished arriving, pushed away by
+every transcript line that landed while you read.
+
 Under the meters is a switch bank. **ROUND** picks what the lever answers for —
 `CODE`, `DESIGN`, `DEBRIEF`, `PAIR`, `DEV` — and **GIVES** picks `ANSWER` or
 `NUDGE`. Throwing either starts a fresh Claude process, so the next press pays
@@ -126,6 +133,7 @@ cargo run --release -p jay -- transcribe --seconds 20
 | | |
 | --- | --- |
 | `jay check` | Try every permission, weight and credential for real. Run before a session. |
+| `jay demo` | Open the panel with sample content and no audio. For checking the panel. |
 | `jay transcribe` | The main event: listen, show the panel, answer when asked. |
 | `jay ask "<question>"` | One-shot, no audio. The fastest way to see what a mode gives you. |
 | `jay brief --out brief.md` | Build standing context from your memory index. |

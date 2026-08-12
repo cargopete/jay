@@ -602,3 +602,44 @@ close behind the speaker. That was a fair trade when a press read whatever
 happened to be in the transcript already. It is not one now: pressing the lever
 flushes whatever is mid-sentence and waits for it, so a longer window costs
 nothing at the moment anybody is actually reading. Raised to about a second.
+
+## The panel is checkable now
+
+`jay demo` opens the overlay with one of everything in it — a notice, both
+speakers, a dropped artefact, a real answer with a real code block — and no
+audio, no model, no spending. Meters are driven by a thread writing plausible
+levels so the four states can be seen rather than reasoned about.
+
+It exists because the panel was the one part of jay with no way to check it.
+The tests can assert that an answer splits into prose and code; they could not
+tell anyone that the switch bank came out reading `NUDGE ANSWER GIVES`, which
+shipped and was obvious the moment somebody looked at it. Opened, screenshotted
+and read, that took thirty seconds to find.
+
+Two more came out of the same first look:
+
+**The answer was being read from its end backwards.** One scroll area held
+everything and stuck to the bottom, so the "Approach:" line — the one sentence
+the candidate is meant to say out loud first — had already scrolled off by the
+time the code finished arriving, and every transcript line landing while they
+read pushed it further away. Now the reading has the top and holds its
+position, rewinding to the beginning of each new answer; the conversation has
+the bottom and chases itself.
+
+**Notices were shouting.** Uppercase with wide tracking is how a machine labels
+a dial. Applied to "I WILL NOT SAY ANYTHING UNTIL YOU PRESS ASK JAY" it is how
+a machine sounds unhinged. Stencils are for labels; sentences are set in quiet
+faint ink.
+
+## Code with a known panic in it is not an answer
+
+The coding prompt asked for edge cases, and got them — as a list underneath
+code that did not handle them:
+
+> - Empty grid: `grid[0]` panics, guard with `if grid.is_empty()`.
+
+That is worse than not mentioning it. An interviewer reading a function whose
+own author has documented the panic sees somebody who spotted the bug and
+shipped it anyway. The prompt now requires the code to handle everything it
+lists, and the same question returns
+`grid.first().map_or(0, |r| r.len())` with bounds guarded in the recursion.

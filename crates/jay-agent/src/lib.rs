@@ -155,6 +155,10 @@ impl Mode {
                  named in one comment.\n\
                  3. One line: time and space complexity.\n\
                  4. At most three edge cases, one line each.\n\n\
+                 The code must already handle every edge case it lists. Do not \
+                 hand over a function with a known panic in it and mention the \
+                 panic underneath — an interviewer reading that sees someone \
+                 who spotted the bug and shipped it anyway.\n\n\
                  Hard limit: under 120 words of prose in total, outside the \
                  code. No preamble, no alternative implementations, no asides \
                  about what the interviewer might prefer, no closing summary. \

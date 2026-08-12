@@ -138,7 +138,7 @@ pub fn run(
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("jay")
-            .with_inner_size([600.0, 500.0])
+            .with_inner_size([620.0, 620.0])
             .with_min_inner_size([360.0, 200.0])
             .with_transparent(true)
             .with_decorations(false)
@@ -189,6 +189,11 @@ struct Overlay {
     last_signal: Option<Instant>,
     /// The answer currently being written, if one is.
     partial: Option<String>,
+    /// The last finished answer. Kept apart from the transcript because it is
+    /// the thing being read, and the transcript is the thing that moves.
+    answer: Option<Line>,
+    /// Set when a new answer arrives, to send the reading pane back to the top.
+    rewind: bool,
     /// Live input levels, written by the capture loop.
     levels: std::sync::Arc<jay_audio::Levels>,
     /// Which channels this session asked for, as `[mic, system]`.
@@ -200,6 +205,11 @@ struct Overlay {
 }
 
 impl Overlay {
+    // Eight arguments, and each is a distinct thing the panel cannot work out
+    // for itself: what to draw, where to send presses, which model, which
+    // switch positions, the live levels, and which channels were asked for. A
+    // struct would move the list somewhere else without shortening it.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
         rx: Receiver<Line>,
@@ -222,7 +232,7 @@ impl Overlay {
         // Monospace is the body face, not an accent: an instrument panel is
         // set in the face the machine can print.
         cc.egui_ctx.all_styles_mut(|style| {
-            for (_, id) in style.text_styles.iter_mut() {
+            for id in style.text_styles.values_mut() {
                 id.family = egui::FontFamily::Monospace;
             }
         });
@@ -238,6 +248,8 @@ impl Overlay {
             waiting_since: None,
             last_signal: None,
             partial: None,
+            answer: None,
+            rewind: false,
             levels,
             expected,
             shown: [(0.0, 0); 2],
@@ -285,6 +297,39 @@ impl Overlay {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         response.clicked() && !active
+    }
+
+    /// The reading compartment. `lag` present means finished; absent means
+    /// still being written, which is drawn in ember rather than brass.
+    fn draw_reading(ui: &mut egui::Ui, text: &str, lag: Option<std::time::Duration>) {
+        egui::Frame::new()
+            .fill(IRON_2)
+            .stroke(egui::Stroke::new(1.0, SEAM))
+            .inner_margin(10.0)
+            .corner_radius(2.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("READING")
+                            .size(HEADING)
+                            .strong()
+                            // Ember is hot iron, which is what working looks
+                            // like; brass is the finished reading.
+                            .color(if lag.is_some() { BRASS } else { EMBER }),
+                    );
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.label(stencil(&match lag {
+                                Some(lag) => format!("{:.0}s", lag.as_secs_f32()),
+                                None => "writing".to_string(),
+                            }));
+                        },
+                    );
+                });
+                ui.add_space(3.0);
+                Self::draw_answer(ui, text);
+            });
     }
 
     /// Draw an answer, with its code in a well cut into the plate.
@@ -575,6 +620,10 @@ impl eframe::App for Overlay {
             // A partial replaces the one before it and is never retained: the
             // finished suggestion is the thing that goes in the transcript.
             if line.kind == Kind::Partial {
+                if self.partial.is_none() {
+                    // A fresh answer starts at its beginning.
+                    self.rewind = true;
+                }
                 self.partial = Some(line.text);
                 continue;
             }
@@ -582,6 +631,8 @@ impl eframe::App for Overlay {
             if line.kind == Kind::Suggestion {
                 self.waiting_since = None;
                 self.partial = None;
+                self.answer = Some(line.clone());
+                self.rewind = true;
             }
             if line.kind == Kind::Transcript {
                 self.last_signal = Some(Instant::now());
@@ -708,14 +759,59 @@ impl eframe::App for Overlay {
             ui.add_space(4.0);
             ui.separator();
 
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if self.lines.is_empty() && self.partial.is_none() {
+            // Two compartments, and which is which matters.
+            //
+            // One scroll area held everything, sticking to the bottom, so an
+            // answer was read from its end backwards: the "Approach:" line —
+            // the one sentence you are meant to say out loud first — had
+            // already scrolled off by the time the code finished arriving, and
+            // every transcript line that landed while you read pushed it
+            // further away.
+            //
+            // So the answer gets the top and stays where it was put, and the
+            // conversation runs along the bottom where it can chase itself.
+            let split = (ui.available_height() * 0.66).max(140.0);
+
+            let mut reading = egui::ScrollArea::vertical()
+                .id_salt("reading")
+                .max_height(split)
+                .auto_shrink([false, false]);
+            // A new answer starts at its beginning, not wherever the last one
+            // happened to leave the scrollbar.
+            if self.rewind {
+                reading = reading.vertical_scroll_offset(0.0);
+                self.rewind = false;
+            }
+            reading.show(ui, |ui| {
+                match (&self.partial, &self.answer) {
+                    (Some(partial), _) => Self::draw_reading(ui, partial, None),
+                    (None, Some(answer)) => {
+                        Self::draw_reading(ui, &answer.text, Some(answer.lag))
+                    }
+                    (None, None) => {
                         // Absent is absent. Never a zero, never a dash that
                         // could pass for a reading.
                         ui.add_space(8.0);
+                        ui.label(stencil("no reading"));
+                        ui.label(
+                            egui::RichText::new("nothing asked for yet")
+                                .size(BODY)
+                                .color(INK_FAINT),
+                        );
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(3.0);
+
+            egui::ScrollArea::vertical()
+                .id_salt("transcript")
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if self.lines.is_empty() {
                         ui.label(stencil("no signal"));
                         ui.label(
                             egui::RichText::new("nothing heard yet")
@@ -726,42 +822,22 @@ impl eframe::App for Overlay {
                     for line in &self.lines {
                         match line.kind {
                             Kind::Notice => {
-                                ui.label(stencil(&line.text));
-                                ui.add_space(2.0);
+                                // Not a stencil. Uppercase with wide tracking
+                                // is how a machine labels a dial; shouting a
+                                // whole sentence in it — "I WILL NOT SAY
+                                // ANYTHING UNTIL YOU PRESS ASK JAY" — is how a
+                                // machine sounds unhinged.
+                                ui.label(
+                                    egui::RichText::new(&line.text)
+                                        .size(LABEL)
+                                        .family(egui::FontFamily::Monospace)
+                                        .color(INK_FAINT),
+                                );
+                                ui.add_space(3.0);
                             }
-                            Kind::Partial => {} // never retained
-                            Kind::Suggestion => {
-                                // A reading, in its own labelled compartment.
-                                // Data lives inside a compartment here, the way
-                                // it does on real equipment.
-                                egui::Frame::new()
-                                    .fill(IRON_2)
-                                    .stroke(egui::Stroke::new(1.0, SEAM))
-                                    .inner_margin(10.0)
-                                    .corner_radius(2.0)
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("READING")
-                                                    .size(HEADING)
-                                                    .strong()
-                                                    .color(BRASS),
-                                            );
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    ui.label(stencil(&format!(
-                                                        "{:.0}s",
-                                                        line.lag.as_secs_f32()
-                                                    )));
-                                                },
-                                            );
-                                        });
-                                        ui.add_space(3.0);
-                                        Self::draw_answer(ui, &line.text);
-                                    });
-                                ui.add_space(6.0);
-                            }
+                            // Answers live in the compartment above; drafts of
+                            // them are never retained at all.
+                            Kind::Partial | Kind::Suggestion => {}
                             Kind::Transcript => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing.x = 7.0;
@@ -779,34 +855,9 @@ impl eframe::App for Overlay {
                             }
                         }
                     }
-
-                    // The answer being written, below everything said so far.
-                    if let Some(partial) = &self.partial {
-                        egui::Frame::new()
-                            .fill(IRON_2)
-                            .stroke(egui::Stroke::new(1.0, SEAM))
-                            .inner_margin(10.0)
-                            .corner_radius(2.0)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    // Ember: hot iron is what working looks
-                                    // like, and this reading is not finished.
-                                    ui.label(
-                                        egui::RichText::new("READING")
-                                            .size(HEADING)
-                                            .strong()
-                                            .color(EMBER),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| ui.label(stencil("writing")),
-                                    );
-                                });
-                                ui.add_space(3.0);
-                                Self::draw_answer(ui, partial);
-                            });
-                        ui.add_space(6.0);
-                    }
+                    // The last line wants room to breathe rather than sitting
+                    // against the bottom edge of the plate.
+                    ui.add_space(6.0);
                 });
         }
 

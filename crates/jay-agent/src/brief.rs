@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn keywords_match_name_or_hook_case_insensitively() {
-        let entries = vec![
+        let entries = [
             Entry { name: "project_nuthatch.md".into(), hook: "a Rust indexer".into() },
             Entry { name: "project_linnet.md".into(), hook: "a Flutter period tracker".into() },
         ];
