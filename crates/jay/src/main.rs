@@ -131,11 +131,19 @@ enum Command {
     },
     /// Open the panel with sample content and no audio.
     ///
+    /// `--state` picks which moment to draw: `empty` is what you see when the
+    /// session starts, `writing` is an answer mid-stream, `answered` is one
+    /// finished. All three are worth looking at; only the last was, for a while.
+    ///
     /// The panel is the one part of jay with no other way to check it. The
     /// tests can assert that an answer splits into prose and code; they cannot
     /// tell you the switch bank came out reading "NUDGE ANSWER GIVES", which
     /// is a thing that shipped and was obvious the moment somebody looked.
-    Demo,
+    Demo {
+        /// Which moment to draw: empty, writing, or answered.
+        #[arg(long, default_value = "answered")]
+        state: String,
+    },
     /// Check everything jay needs before a session.
     ///
     /// Run this once from the .app bundle before you sit down. Permissions on
@@ -240,7 +248,7 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Demo => demo(),
+        Command::Demo { state } => demo(&state),
         Command::Devices => devices(),
         Command::Listen {
             source,
@@ -1297,7 +1305,7 @@ fn drain(rx: &crossbeam_channel::Receiver<Frame>, window: Duration) -> (u64, f32
 ///
 /// No capture, no model, no spending. Meters are driven by a thread writing
 /// plausible levels so the four states can be seen rather than reasoned about.
-fn demo() -> Result<()> {
+fn demo(state: &str) -> Result<()> {
     let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
     let (request_tx, request_rx) = crossbeam_channel::bounded::<jay_ui::Request>(8);
     let levels = std::sync::Arc::new(jay_audio::Levels::default());
@@ -1328,6 +1336,25 @@ fn demo() -> Result<()> {
         }
     });
 
+    // The meters tell a different story in each state, and "no frames" in
+    // ember is the one that matters most, so it gets shown.
+    if state == "empty" {
+        let _ = line_tx.send(jay_ui::Line::notice(
+            "ready in Coding mode. I will not say anything until you press ask jay."
+                .to_string(),
+        ));
+        return jay_ui::run(
+            line_rx,
+            request_tx,
+            "medium.en".to_string(),
+            jay_agent::Mode::Coding,
+            jay_agent::Depth::default(),
+            levels,
+            [true, true],
+        )
+        .map_err(|e| anyhow::anyhow!("overlay: {e}"));
+    }
+
     for line in [
         jay_ui::Line::notice(
             "ready in Coding mode. I will not say anything until you press ask jay."
@@ -1350,10 +1377,23 @@ fn demo() -> Result<()> {
             "How are you going to avoid counting the same island twice?",
             Duration::from_millis(2100),
         ),
-        jay_ui::Line::suggestion(DEMO_ANSWER.to_string(), Duration::from_secs(10)),
-        jay_ui::Line::notice("10.3s · $0.196 · $0.20 this session".to_string()),
     ] {
         let _ = line_tx.send(line);
+    }
+
+    if state == "writing" {
+        // Half an answer, which is what the panel spends most of its ten
+        // seconds drawing.
+        let cut = DEMO_ANSWER.len() * 3 / 5;
+        let _ = line_tx.send(jay_ui::Line::partial(DEMO_ANSWER[..cut].to_string()));
+    } else {
+        let _ = line_tx.send(jay_ui::Line::suggestion(
+            DEMO_ANSWER.to_string(),
+            Duration::from_secs(10),
+        ));
+        let _ = line_tx.send(jay_ui::Line::notice(
+            "10.3s · $0.196 · $0.20 this session".to_string(),
+        ));
     }
 
     jay_ui::run(

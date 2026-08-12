@@ -643,3 +643,19 @@ own author has documented the panic sees somebody who spotted the bug and
 shipped it anyway. The prompt now requires the code to handle everything it
 lists, and the same question returns
 `grid.first().map_or(0, |r| r.len())` with bounds guarded in the recursion.
+
+## The panel is a strip until it has something to say
+
+Opened empty and photographed, the panel was a 620x620 blank slab parked over
+the editor, holding two words of "nothing asked for yet" and one faint notice.
+The whole justification for an overlay is that it is glanceable without leaving
+what you are doing, and it spends most of a session with nothing in the reading
+pane at all.
+
+It now opens at 330px — header, meters, switches, and enough room for the
+conversation to accumulate — and grows to 640 the first time there is something
+to read. It never shrinks again on its own: moving a window somebody is
+mid-sentence through is worse than leaving it large.
+
+`jay demo --state empty|writing|answered` draws each moment. All three were
+worth looking at; only the last one had been.

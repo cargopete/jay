@@ -138,7 +138,7 @@ pub fn run(
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("jay")
-            .with_inner_size([620.0, 620.0])
+            .with_inner_size([620.0, COMPACT_HEIGHT])
             .with_min_inner_size([360.0, 200.0])
             .with_transparent(true)
             .with_decorations(false)
@@ -194,6 +194,8 @@ struct Overlay {
     answer: Option<Line>,
     /// Set when a new answer arrives, to send the reading pane back to the top.
     rewind: bool,
+    /// Whether the window has already grown for its first answer.
+    expanded: bool,
     /// Live input levels, written by the capture loop.
     levels: std::sync::Arc<jay_audio::Levels>,
     /// Which channels this session asked for, as `[mic, system]`.
@@ -250,6 +252,7 @@ impl Overlay {
             partial: None,
             answer: None,
             rewind: false,
+            expanded: false,
             levels,
             expected,
             shown: [(0.0, 0); 2],
@@ -514,6 +517,19 @@ const EMBER: egui::Color32 = egui::Color32::from_rgb(0xe8, 0x92, 0x2a);
 /// panel.
 const GROUND_ALPHA: f32 = 0.97;
 
+/// The panel with nothing to read in it: header, meters, switches, and enough
+/// transcript to see the conversation moving.
+///
+/// It opens at this height and grows the first time there is an answer. An
+/// empty 620x620 slab parked over your editor is the opposite of glanceable,
+/// and the panel spends most of a session with nothing in the reading pane.
+/// It never shrinks again on its own — moving a window somebody is reading is
+/// worse than leaving it large.
+const COMPACT_HEIGHT: f32 = 330.0;
+
+/// The panel with an answer in it.
+const EXPANDED_HEIGHT: f32 = 640.0;
+
 /// How long a channel may take to deliver its first frame before the panel
 /// calls it dead. A cpal stream takes a moment to open; a minute does not.
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(6);
@@ -770,7 +786,14 @@ impl eframe::App for Overlay {
             //
             // So the answer gets the top and stays where it was put, and the
             // conversation runs along the bottom where it can chase itself.
-            let split = (ui.available_height() * 0.66).max(140.0);
+            // With nothing to read, the reading pane is a label and no more;
+            // the conversation takes the rest.
+            let has_reading = self.partial.is_some() || self.answer.is_some();
+            let split = if has_reading {
+                (ui.available_height() * 0.66).max(140.0)
+            } else {
+                46.0
+            };
 
             let mut reading = egui::ScrollArea::vertical()
                 .id_salt("reading")
@@ -859,6 +882,15 @@ impl eframe::App for Overlay {
                     // against the bottom edge of the plate.
                     ui.add_space(6.0);
                 });
+        }
+
+        // Grow once, the first time there is something to read. Sent here
+        // rather than on arrival because a viewport command needs the context.
+        if !self.expanded && (self.partial.is_some() || self.answer.is_some()) {
+            self.expanded = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                egui::vec2(620.0, EXPANDED_HEIGHT),
+            ));
         }
 
         // Repaint steadily rather than only on input, or new transcript lines

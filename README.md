@@ -133,7 +133,7 @@ cargo run --release -p jay -- transcribe --seconds 20
 | | |
 | --- | --- |
 | `jay check` | Try every permission, weight and credential for real. Run before a session. |
-| `jay demo` | Open the panel with sample content and no audio. For checking the panel. |
+| `jay demo` | Draw the panel with sample content and no audio. `--state empty\|writing\|answered`. |
 | `jay transcribe` | The main event: listen, show the panel, answer when asked. |
 | `jay ask "<question>"` | One-shot, no audio. The fastest way to see what a mode gives you. |
 | `jay brief --out brief.md` | Build standing context from your memory index. |
