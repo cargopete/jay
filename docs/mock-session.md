@@ -1,169 +1,92 @@
-# Running a mock interview with jay
+# Running a mock loop
 
-Written for a two-part loop — 40 minutes of coding, 40 of system design — with
-a partner playing interviewer.
+Two rounds, back to back, with a partner playing interviewer over a call.
+Everything here has been run against the real prompt path.
 
-## First, run the preflight
+## Before she joins
 
-macOS permissions fail silently — an ungranted audio tap returns silence, an
-ungranted screen capture returns an error nobody reads — so the only way to know
-is to try each one and look.
+**Headphones on.** Not optional. Her voice leaving your speakers and returning
+through your microphone is captured on both channels, so every question lands
+twice with one copy blamed on you. Reproduced, exactly:
+
+```
+[00:11] them: Given a two-dimensional grid of ones and zeros, find the largest island by area.
+[00:11] you:  Given a two-dimensional grid of ones and zeros, find the largest island by area.
+```
+
+Then, with something playing so the tap has audio to capture:
 
 ```sh
-scripts/bundle.sh debug
-open -a "$PWD/target/debug/jay.app" --args check --out check.txt
-cat check.txt
+open -n -a ~/Projects/jay/target/release/jay.app --args check --out /tmp/jay-check.txt
+cat /tmp/jay-check.txt
 ```
 
-It exercises the microphone, the system tap, screen capture, the whisper
-weights and the `claude` CLI, and it warms the prompt cache while it is at it.
-Expect this:
+The `mic` peak wants to be above 0.02 while you speak — a room at rest reads
+about 0.003, and exact zeros are a refused permission rather than a quiet room.
+The `system` line wants a few hundred frames; zero frames there means nothing
+was playing, not that the tap is broken.
 
-```
-  mic       OK   MacBook Pro Microphone
-  system    OK   tap running at 48000 Hz
-  screen    OK   captured 412 KB
-  whisper   OK   …/ggml-small.en.bin
-  claude    OK   6.6s, $0.0135 — cache is now warm
-```
+## The session
 
-**If `screen` says FAIL**, jay has just asked macOS for the permission, so it
-will now appear in **System Settings › Privacy & Security › Screen & System
-Audio Recording**. Tick it, then run the check again. Left unfixed, every button
-press sends the conversation and silently no screenshot.
-
-(If it still fails with the toggle on, that is not your setup — it means
-something has reintroduced the old subprocess capture. jay captures in process
-precisely because a spawned `screencapture` does not inherit the grant.)
-
-## Before they arrive
-
-**The interviewer is on a call**, so their voice arrives on system audio and
-yours on the microphone. jay uses that to tell you apart, which matters more
-than it sounds: it means your own thinking aloud is recorded as context but
-never mistaken for a question, and most of what you say while solving something
-is thinking aloud.
-
-That needs `--source both`, and system audio needs the LaunchServices launch
-below. Launch it from a shell instead and macOS feeds the tap an unbroken
-stream of zeros — no error, no warning, it simply never hears her.
-
-(If you ever do run in the same room, use `--source mic`. jay will say in the
-panel that it cannot tell who is speaking and treat every question as worth
-answering, which is the honest fallback.)
-
-**Warm the cache.** The first `claude -p` call of the hour costs about
-$0.025 and every one after it about $0.003, because the CLI's ~29,000-token
-preamble is cached for an hour. Ask it something trivial before you start:
+One command for the whole loop. The switch bank moves you between rounds, so
+there is no reason to quit and relaunch in the middle:
 
 ```sh
-jay ask --mode coding --hint "warm up"
+open -n -a ~/Projects/jay/target/release/jay.app --args \
+  transcribe --overlay --source both --mode coding --seconds 0 \
+  --brief ~/Library/Application\ Support/jay/brief.md \
+  --vocab "SiloBin, pastebin, base62, Redpanda, idempotent, jemalloc"
 ```
 
-**Write the brief.** Two or three sentences about who you are and what you have
-actually operated beats a hundred lines of project index — measured, and the
-long version was worse. Keep it under a page.
+`-n` matters. Without it, a second launch while any jay is running is silently
+discarded: it activates the existing instance, ignores every argument, and
+exits 0.
 
-```sh
-jay brief --out brief.md --match indexer --match gateway --match rust
-$EDITOR brief.md          # fill in "Who you are", delete the rest
-```
+`--vocab` matters more than it looks. Neither `medium` nor `turbo` gets
+*pastebin* or *jemalloc* unaided, and no model size rescues a product name.
+Add whatever nouns this round turns on.
 
-## Launching
+**Between the rounds**, throw `ROUND` from `CODE` to `DESIGN` on the panel.
+That starts a fresh Claude process, so the next press pays the 4.7 second
+startup again — which is the price of not quitting mid-interview.
 
-```sh
-scripts/bundle.sh release          # re-run this after every rebuild
-open -a "$PWD/target/release/jay.app" --args \
-  transcribe --overlay --source both \
-  --mode coding --brief brief.md \
-  --save part1.txt --seconds 0
-```
+**Set `GIVES` to `NUDGE`** when you want the rep rather than the answer: the
+approach and the complexity in under forty words, no implementation.
 
-`scripts/bundle.sh` **copies** the binary, so a bundle built before your last
-`cargo build` runs the old code. This has already caught me out once.
+## What good looks like
 
-`--seconds 0` runs until you close the panel.
+Both rounds dry-run against a realistic transcript.
 
-**Every run archives itself.** You do not need `--save`; a timestamped file
-appears under `~/Library/Application Support/jay/sessions/` holding the
-conversation, what jay said, when each thing happened, and what each suggestion
-cost. That file is the feedback loop — it is an evaluation set, not a log, and
-any moment in it can be replayed through the real prompt path.
+**Coding**, asked the interviewer's follow-up rather than the original problem
+— which is the point, since by the time an answer arrives you have started:
 
-Start a second run with `--mode system-design --save part2.txt` for part two.
+> A `visited` grid, or mutate the input in place: when you count a cell, zero
+> it out so it can never be reached again.
 
-## Sharing your screen
+…then compiling Rust with the invariant in a comment, `O(rows × cols)` time and
+stack, and three edge cases. **9.8s.**
 
-**Share a window, not the whole screen.** jay cannot reliably hide itself and
-does not pretend to: the flag that used to exclude a window from capture
-(`NSWindow.sharingType = .none`) stopped working for ScreenCaptureKit in macOS
-15.4, and Meet's screen share goes through ScreenCaptureKit. A switch labelled
-"invisible" that silently does nothing is worse than none, because you plan
-around it.
+**System design**, opening with what the candidate had missed:
 
-Sharing a single window is structural rather than a flag that might hold: share
-the editor, keep the panel on a second display or beside the shared window, and
-jay is never in the captured region at all.
+> **Missing:** you jumped to storage without saying how the ID is minted, and
+> blob-plus-Postgres for a 10 KB paste is two round trips where one would do.
 
-## During
-
-**jay never volunteers.** It listens, transcribes and stays quiet until you
-press **ask jay**, and there is no setting that changes that. Nothing is spent
-you did not ask for, and a panel that only speaks when spoken to is one you can
-forget is running.
-
-Pressing it sends the pinned problem, the recent conversation, and a screenshot
-of the focused window — so if the question is about the code you are looking at,
-look at it before you press. It picks what to answer by walking back for the
-most recent thing the interviewer actually asked, rather than taking the last
-line, which is usually you mid-sentence.
-
-Switch modes between parts. `--mode coding` gives compiling Rust, the
-complexity and the edge cases; `--mode system-design` gives capacity numbers, a
-component diagram and the decisions with their tradeoffs. Add `--hint` to either
-when you want a nudge instead — approach and complexity, under forty words, no
-implementation, and about three times faster.
+…then 116 writes/s, 11.6k reads/s, 100 GB/day, 36 TB/year, an ASCII diagram,
+each component in a line, and the decisions with what each traded away — random
+7-char base62 with `INSERT … ON CONFLICT DO NOTHING` and a retry, rather than a
+coordination service. **14.9s.**
 
 ## Afterwards
 
-The debrief is the part that makes you better, and it is a different mode:
+Every session is archived to `~/Library/Application Support/jay/sessions/`
+without being asked. Replay any moment through the real prompt path:
 
 ```sh
-jay ask --mode rehearsal --brief brief.md \
-  --context ~/Library/Application\ Support/jay/sessions/<the-session>.md \
-  "Return the size of the largest connected flooded zone in a grid."
+jay ask --mode rehearsal --brief ~/Library/Application\ Support/jay/brief.md \
+  --context ~/Library/Application\ Support/jay/sessions/<session>.md \
+  "Find the maximum area of an island in a grid."
 ```
 
-It leads with what your attempt missed, quoting you, then gives the worked
-answer. On a real transcript it caught a *habit* rather than a knowledge gap —
-"that hands the wheel to the interviewer" — which is the sort of thing that
-costs you an offer and that nobody tells you.
-
-## What to expect from the numbers
-
-| | |
-| --- | --- |
-| Idle CPU while listening | 12–25% of one core |
-| Memory | ~19 MB, flat |
-| Whisper `small.en` | comfortably faster than real time on an M3 Pro |
-| A hint | ~5s, ~$0.14 |
-| A full answer with code or a diagram | ~16–20s, ~$0.20 |
-
-Budget accordingly: `--budget` defaults to $2.00 a session and stops
-suggestions once spent. It is checked before a call rather than during one, so
-it can overshoot by the cost of whatever was in flight.
-
-## If something goes wrong
-
-**The panel says nothing.** Check the transcript is appearing at all. If it is
-not, and you are on `--source both`, you almost certainly launched from a shell
-instead of through `open -a`, and macOS is feeding the tap silence.
-
-**Suggestions never fire on their own.** By design. Press the button.
-
-**"still thinking about the last one".** A suggestion takes up to twenty
-seconds and only one runs at a time. This is deliberate: the alternative is the
-transcriber stalling behind it and losing audio.
-
-**Words are wrong in the transcript.** `--model small` is the default; `--model
-base` is faster and worse on jargon. There is no larger option wired up yet.
+`rehearsal` is the debrief mode: what your attempt missed, quoted back, then
+the full worked answer. It is the only mode with no length cap, because it runs
+after the interview where being thorough costs nobody the thread.
