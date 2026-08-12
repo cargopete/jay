@@ -221,7 +221,12 @@ pub const LATE_ARRIVAL: &str = " You are always reading a conversation already \
     in progress: by the time this reaches them they will have started \
     answering. Read what they have already said and do not repeat it back. \
     Give only what is missing, wrong, or worth adding. If they have covered it \
-    well, say so in one line and stop.";
+    well, say so in one line and stop.\n\nYou have no tools, no filesystem and \
+    no way to run anything, which is deliberate. Do not attempt to compile, \
+    test or verify, and do not remark on being unable to — no notes about \
+    sandboxes, tooling or what you would have checked. The person is \
+    mid-conversation and every such sentence costs them the thread. Start with \
+    the first substantive word: no preamble about your process.";
 
 /// What came back, with what it cost.
 #[derive(Debug, Clone)]
@@ -257,6 +262,23 @@ mod tests {
     /// The panel draws one switch per entry in `ALL` and sends the mode back.
     /// If a mode were ever added without being listed, it would simply be
     /// unreachable from the panel, silently.
+    /// jay disables every tool, so the model has nothing to run. Left to
+    /// Claude Code's own preamble it narrates that absence — one debrief
+    /// opened "the sandbox here declined to run `rustc`", which is noise in
+    /// front of an answer somebody is reading mid-interview.
+    #[test]
+    fn every_mode_is_told_it_has_no_tools() {
+        for mode in Mode::ALL {
+            for depth in Depth::ALL {
+                let whole = format!("{}{}", mode.system_prompt(depth), LATE_ARRIVAL);
+                assert!(
+                    whole.contains("no tools"),
+                    "{mode:?}/{depth:?} may narrate its own tooling"
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_mode_is_reachable_from_the_switch_bank() {
         for mode in [

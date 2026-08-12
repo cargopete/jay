@@ -659,3 +659,39 @@ mid-sentence through is worse than leaving it large.
 
 `jay demo --state empty|writing|answered` draws each moment. All three were
 worth looking at; only the last one had been.
+
+## The model narrating its own missing tools
+
+A debrief opened:
+
+> I wrote the tests but the sandbox here declined to run `rustc`, so what
+> follows is hand-checked rather than machine-checked.
+
+jay disables every tool deliberately — it wants an opinion, not an agent loose
+in a filesystem — but the CLI still carries Claude Code's own system prompt,
+which frames everything in terms of tools it might have used. So it apologised
+for an absence that was the whole design, in front of an answer somebody is
+reading mid-interview.
+
+Every mode is now told, in the shared tail, that it has no tools and should not
+remark on it, and to start with the first substantive word rather than a
+preamble about its own process. The same debrief came back at **60.1s instead
+of 108.7s**, opening "Three things, in order of how much they cost you." A test
+asserts every mode and depth carries the instruction.
+
+## What the modes actually produce (measured)
+
+| | latency | notes |
+| --- | --- | --- |
+| `code` · answer | 9.4s | approach, compiling Rust, complexity, three edge cases |
+| `code` · nudge | 5.6s | the trap and the complexity, no implementation |
+| `design` · answer | 14.9s | opens with what was missed, numbers, diagram, tradeoffs |
+| `design` · nudge | 6.1s | one point: collision handling, counter versus random |
+| `debrief` | 60.1s | quotes the attempt back, then the full worked answer |
+
+The debrief is the one mode with no length cap, and should stay that way: it
+runs after the interview, where being thorough costs nobody the thread. On a
+flawed attempt it found a `usize` underflow in a bounds check that had been
+stated out loud and passed unremarked, and told the candidate that naming a
+failure mode without offering the fix "reads as luck". That is the mode
+earning its place.
