@@ -200,11 +200,24 @@ pub fn draw(
         }
     }
 
+    // Where a label has already been written, so the next one can be moved
+    // out of the way. Two edges between the same pair of boxes land on exactly
+    // the same midpoint otherwise, and "create paste" over "GET slug" reads as
+    // "cr6ETesphgte" — observed, in the first drawing this ever produced.
+    let mut taken: Vec<egui::Rect> = Vec::new();
+
     // Edges first, so the boxes sit on top of the lines rather than under them.
-    for edge in &chart.edges {
+    for (index, edge) in chart.edges.iter().enumerate() {
         let (a, b) = (centres[edge.from], centres[edge.to]);
-        let from = egui::pos2(a.x, a.y + node_h / 2.0);
-        let to = egui::pos2(b.x, b.y - node_h / 2.0);
+        // Parallel edges are fanned apart at both ends, so two arrows between
+        // the same pair are two visible lines rather than one drawn twice.
+        let parallel = chart.edges[..index]
+            .iter()
+            .filter(|e| e.from == edge.from && e.to == edge.to)
+            .count() as f32;
+        let fan = parallel * 9.0 * scale;
+        let from = egui::pos2(a.x + fan, a.y + node_h / 2.0);
+        let to = egui::pos2(b.x + fan, b.y - node_h / 2.0);
         painter.line_segment([from, to], egui::Stroke::new(1.0, line));
 
         // Arrowhead, drawn by hand: egui has no arrow primitive and a triangle
@@ -219,12 +232,27 @@ pub fn draw(
         ));
 
         if !edge.label.is_empty() {
-            let mid = from + (to - from) * 0.5;
-            painter.text(
-                mid,
-                egui::Align2::CENTER_CENTER,
-                &edge.label,
-                egui::FontId::monospace(9.0 * scale.max(0.8)),
+            let font = egui::FontId::monospace(9.0 * scale.max(0.8));
+            let galley = painter.layout_no_wrap(edge.label.clone(), font.clone(), faint);
+            let mut at = from + (to - from) * 0.5;
+
+            // Slide down the line until clear of every label already placed.
+            // Down rather than sideways: the gap between two ranks is empty
+            // and the space beside an edge usually is not.
+            let step = galley.size().y + 2.0;
+            for _ in 0..8 {
+                let rect = egui::Rect::from_center_size(at, galley.size())
+                    .expand2(egui::vec2(2.0, 0.0));
+                if !taken.iter().any(|other| other.intersects(rect)) {
+                    taken.push(rect);
+                    break;
+                }
+                at.y += step;
+            }
+
+            painter.galley(
+                at - galley.size() / 2.0,
+                galley,
                 faint,
             );
         }
