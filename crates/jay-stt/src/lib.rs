@@ -230,6 +230,27 @@ fn words(text: &str) -> Vec<String> {
 /// wide margin. Room tone does not.
 pub const SPEECH_PEAK_FLOOR: f32 = 0.01;
 
+/// An utterance shorter than this is only trusted if it was also loud.
+///
+/// Measured, by dictating a script into a live session and logging every
+/// utterance. Real speech, on both channels, ran **8.4 to 15.4 seconds**.
+/// Every invention in the quiet minute afterwards ran **1.25 to 3.14 seconds**.
+/// Nothing straddled the gap.
+///
+/// Duration alone would be too blunt — "use a visited grid" is a real answer
+/// and takes two seconds — so this is paired with [`QUIET_SPEECH_PEAK`] and
+/// both must hold. Somebody speaking briefly *at their laptop* is short and
+/// loud; a room being captioned is short and faint.
+pub const BRIEF_UTTERANCE: Duration = Duration::from_millis(3500);
+
+/// The peak below which a brief utterance is not believed.
+///
+/// Three times the [`SPEECH_PEAK_FLOOR`] that catches outright silence, and
+/// well under the 0.06–0.15 a voice at a laptop measures on this machine, so a
+/// quiet speaker still clears it. The inventions above peaked between 0.009 and
+/// 0.042.
+pub const QUIET_SPEECH_PEAK: f32 = 0.03;
+
 /// Reject when the mean token probability falls below this.
 ///
 /// Deliberately low. The evidence behind it is thin: `say`-synthesised speech
@@ -256,6 +277,8 @@ pub enum Rejected {
     Invented { confidence: f32 },
     /// The decoder handed back part of its own priming vocabulary.
     PrimingEcho,
+    /// Too short to be speech, and too faint to be a short answer.
+    TooBrief { spoken: Duration, peak: f32 },
 }
 
 impl Rejected {
@@ -276,6 +299,10 @@ impl Rejected {
             Rejected::PrimingEcho => {
                 "dropped the transcriber reciting its own --vocab back".to_string()
             }
+            Rejected::TooBrief { spoken, peak } => format!(
+                "dropped {:.1}s at peak {peak:.3} — too brief and too faint to be speech",
+                spoken.as_secs_f32()
+            ),
         }
     }
 }
@@ -287,7 +314,11 @@ impl Rejected {
 /// `speech_peak` is the loudest frame the VAD called speech; a caller with no
 /// VAD should pass [`f32::INFINITY`] rather than zero, since the check is a
 /// lower bound and zero would reject everything.
-pub fn judge(transcription: &Transcription, speech_peak: f32) -> Option<Rejected> {
+pub fn judge(
+    transcription: &Transcription,
+    speech_peak: f32,
+    spoken: Duration,
+) -> Option<Rejected> {
     if is_hallucination(&transcription.text) {
         return Some(Rejected::KnownArtefact);
     }
@@ -300,6 +331,15 @@ pub fn judge(transcription: &Transcription, speech_peak: f32) -> Option<Rejected
     if transcription.confidence < CONFIDENCE_FLOOR {
         return Some(Rejected::Invented {
             confidence: transcription.confidence,
+        });
+    }
+    // Short *and* faint. Either on its own is ordinary: a real answer can be
+    // two seconds, and a long utterance can be quiet. Together they are the
+    // signature of a room being captioned.
+    if spoken < BRIEF_UTTERANCE && speech_peak < QUIET_SPEECH_PEAK {
+        return Some(Rejected::TooBrief {
+            spoken,
+            peak: speech_peak,
         });
     }
     None
@@ -318,6 +358,10 @@ mod tests {
             prompt_echo: false,
         }
     }
+
+    /// Long enough that the brief-and-faint rule never fires. Most of these
+    /// tests are about the other rules and should not have to care.
+    const SAID: Duration = Duration::from_secs(9);
 
     /// The vocabulary from the session that produced the bug.
     const PRIMED: &str = "Likely terms: linked list, binary tree, hash map, \
@@ -364,26 +408,26 @@ mod tests {
     fn a_primed_echo_is_binned_even_though_it_reads_confidently() {
         let mut echo = spoken("Redis Kafka", 0.0, 0.97);
         echo.prompt_echo = true;
-        assert_eq!(judge(&echo, 0.4), Some(Rejected::PrimingEcho));
+        assert_eq!(judge(&echo, 0.4, SAID), Some(Rejected::PrimingEcho));
     }
 
     #[test]
     fn judge_keeps_confident_speech_and_bins_the_rest() {
         let real = spoken("reverse a singly linked list in place", 0.02, 0.93);
-        assert_eq!(judge(&real, 0.4), None);
+        assert_eq!(judge(&real, 0.4, SAID), None);
 
         assert_eq!(
-            judge(&spoken("[BLANK_AUDIO]", 0.0, 1.0), 0.4),
+            judge(&spoken("[BLANK_AUDIO]", 0.0, 1.0), 0.4, SAID),
             Some(Rejected::KnownArtefact)
         );
         assert_eq!(
-            judge(&real, 0.001),
+            judge(&real, 0.001, SAID),
             Some(Rejected::TooQuiet { peak: 0.001 })
         );
         // Loud enough, not a known phrase, and written by a decoder that did
         // not believe a word of it.
         assert!(matches!(
-            judge(&spoken("Cool? Distinct.", 0.91, 0.34), 0.4),
+            judge(&spoken("Cool? Distinct.", 0.91, 0.34), 0.4, SAID),
             Some(Rejected::Invented { .. })
         ));
     }
@@ -393,7 +437,7 @@ mod tests {
     #[test]
     fn no_speech_is_reported_but_never_decides() {
         let certain_silence = spoken("a sentence from nowhere", 1.0, 0.99);
-        assert_eq!(judge(&certain_silence, 0.4), None);
+        assert_eq!(judge(&certain_silence, 0.4, SAID), None);
     }
 
     /// The artefact check runs first so its notice is the specific one, and a
@@ -401,16 +445,34 @@ mod tests {
     #[test]
     fn reasons_are_reported_most_specific_first() {
         assert_eq!(
-            judge(&spoken("Thank you.", 0.99, 0.1), 0.0001),
+            judge(&spoken("Thank you.", 0.99, 0.1), 0.0001, SAID),
             Some(Rejected::KnownArtefact)
         );
+    }
+
+    /// The rule that finally caught the inventions, and the measurements it
+    /// was set from: real speech ran 8.4-15.4s, every invention 1.25-3.14s.
+    /// Both conditions must hold, because a real two-second answer spoken at
+    /// the laptop is short but not faint.
+    #[test]
+    fn brief_and_faint_together_are_not_speech() {
+        let text = spoken("ive still packed my tounou manu", 0.0, 0.83);
+        assert!(matches!(
+            judge(&text, 0.011, Duration::from_millis(1600)),
+            Some(Rejected::TooBrief { .. })
+        ));
+
+        // Short, but spoken at the machine: a real answer.
+        assert_eq!(judge(&text, 0.09, Duration::from_millis(1600)), None);
+        // Faint, but sustained: the interviewer across a room.
+        assert_eq!(judge(&text, 0.011, Duration::from_secs(9)), None);
     }
 
     /// A backend without confidence signals reports 0.0/1.0, which must read as
     /// "no opinion" rather than as a reason to bin everything it produces.
     #[test]
     fn a_backend_with_no_confidence_signal_is_not_penalised() {
-        assert_eq!(judge(&spoken("a real sentence here", 0.0, 1.0), 0.4), None);
+        assert_eq!(judge(&spoken("a real sentence here", 0.0, 1.0), 0.4, SAID), None);
     }
 
     #[test]

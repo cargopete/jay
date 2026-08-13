@@ -985,3 +985,41 @@ number implies. After 45 seconds of somebody talking into the microphone with
 zero frames ever delivered by the tap, jay now says it in words. Once, and only
 with `--source both`, and only after long enough that a genuine pause between
 questions cannot trigger it.
+
+## The fabrications, finally measured
+
+Every attempt at this failed because it was a guess. The phrase list is a losing
+race, the confidence floor turned out not to separate anything, and the
+speaker-bleed theory was disproved by a quiet room producing six inventions in a
+minute.
+
+What broke the deadlock was `scripts/dictate.sh`: a script read aloud through
+the output device, so the tap hears it as `them:` exactly as a call would. That
+makes a session repeatable, which makes it measurable. Dictate four paragraphs,
+leave the room silent for a minute, log every utterance.
+
+| | `spoken` | confidence |
+| --- | --- | --- |
+| Real speech, both channels, 8 utterances | 8.4 – 15.4 s | 0.90 – 0.93 |
+| Inventions, 14 utterances | 1.25 – 3.14 s | 0.42 – 0.99 |
+
+Two things fall out. **Confidence is not the signal** — one invention scored
+0.99, higher than any real utterance — which retires an idea that had survived
+three rounds of plausible reasoning. And **duration separates them completely**,
+with a clean gap between 3.14 and 8.4 seconds and nothing in it.
+
+Duration alone would still be wrong, because "use a visited grid" is a real
+answer and takes two seconds. So the rule is a conjunction: an utterance is
+rejected when it is **both** shorter than 3.5 s **and** peaks below 0.03. Short
+and loud is somebody speaking briefly at their laptop. Long and faint is the
+interviewer across a room. Short *and* faint is a room being captioned.
+
+Re-run against the same room and script: seven invented lines before, **zero**
+after, with the dictated paragraphs still arriving verbatim on `them:`. The two
+that the new rule caught were logged as 1.5 s at peak 0.022 and 1.5 s at 0.027.
+
+The general lesson is not about whisper. Three filters were built on reasoning
+about how the failure *ought* to work and none of them touched it. The one that
+worked came from twenty minutes of logging, and the only reason that was
+possible is that the harness made the session repeatable. Build the harness
+first.

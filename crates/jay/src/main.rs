@@ -1134,7 +1134,7 @@ fn run_pipeline(
                 // reason added later cannot be silently skipped by a branch.
                 // Said out loud rather than logged: a session where everything
                 // is dropped must not look like a session where nobody spoke.
-                if let Some(rejected) = jay_stt::judge(&result, utterance.speech_peak) {
+                if let Some(rejected) = jay_stt::judge(&result, utterance.speech_peak, spoken) {
                     tracing::debug!(
                         text = %result.text,
                         peak = utterance.speech_peak,

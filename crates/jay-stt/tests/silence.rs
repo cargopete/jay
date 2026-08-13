@@ -30,6 +30,7 @@
 //! not the place to discover a 1.5 GB download.
 
 use std::path::PathBuf;
+use std::time::Duration;
 use std::process::Command;
 
 use jay_stt::{SpeechModel, models, whisper::Whisper};
@@ -39,6 +40,10 @@ const SAMPLE_RATE: usize = 16_000;
 /// Long enough for the decoder to have something to be wrong about, short
 /// enough that the whole corpus stays under a minute of inference.
 const CHUNK_SECONDS: usize = 8;
+
+/// Every chunk here is a full [`CHUNK_SECONDS`], so the brief-utterance rule
+/// never fires and the corpus tests the filters it is meant to test.
+const CHUNK: Duration = Duration::from_secs(CHUNK_SECONDS as u64);
 
 /// Deterministic noise. A seeded LCG rather than `rand`, because a test that
 /// fails once a fortnight on a lucky seed is worse than no test.
@@ -164,7 +169,7 @@ fn nothing_in_the_room_ever_reaches_the_transcript() {
     let mut survivors = Vec::new();
     for (name, audio) in corpus() {
         let transcription = whisper.transcribe(&audio).expect("transcribing silence");
-        let verdict = jay_stt::judge(&transcription, peak(&audio));
+        let verdict = jay_stt::judge(&transcription, peak(&audio), CHUNK);
 
         println!(
             "{name:<30} peak {:.4}  no_speech {:.2}  confidence {:.2}  {:?}  {:?}",
@@ -201,7 +206,7 @@ fn a_real_sentence_still_gets_through() {
     };
 
     let transcription = whisper.transcribe(&spoken).expect("transcribing speech");
-    let verdict = jay_stt::judge(&transcription, peak(&spoken));
+    let verdict = jay_stt::judge(&transcription, peak(&spoken), CHUNK);
 
     println!(
         "control  no_speech {:.2}  confidence {:.2}  {:?}",
@@ -263,7 +268,7 @@ fn priming_is_measured_rather_than_assumed() {
         let mut survived = 0;
         for chunk in &chunks {
             let t = whisper.transcribe(chunk).expect("transcribing room tone");
-            let verdict = jay_stt::judge(&t, peak(chunk));
+            let verdict = jay_stt::judge(&t, peak(chunk), CHUNK);
             println!(
                 "{:>8} {:?}  {:?}",
                 if primed { "primed" } else { "bare" },
