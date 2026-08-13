@@ -1218,13 +1218,48 @@ fn run_pipeline(
     // was not enough — a whole session was lost to it — so jay now says it in
     // words, once, after long enough that a genuine pause cannot trigger it.
     let mut system_frames = 0u64;
-    let mut mic_speech_frames = 0u64;
     let mut warned_about_one_channel = false;
     const LONELY_MIC_AFTER: Duration = Duration::from_secs(45);
 
     println!("transcribing {source:?} audio with {model}.\n");
 
     while unlimited || started.elapsed() < Duration::from_secs(seconds) {
+        // Before the receive, not after it. Below this point the loop body only
+        // runs when a frame actually arrives, and "no frames at all" is
+        // precisely one of the states worth complaining about — a check that
+        // needs a frame in order to report the absence of frames reports
+        // nothing, which is how the first two versions of this failed.
+        //
+        // Not one frame from the tap, ever, on a session that asked for it.
+        //
+        // The first version of this also required thirty seconds of speech on
+        // the microphone, on the reasoning that a silent session proves
+        // nothing. That reasoning cost a second session: the two of them were
+        // not on a call through this Mac at all, so there was nothing on the
+        // tap *and* almost nothing on the mic, and the warning stayed quiet
+        // through the only run where it mattered.
+        //
+        // Zero frames after 45 seconds is worth saying on its own. A tap
+        // delivers no callbacks at all on an idle output, so this is not
+        // evidence of a fault — but somebody who asked for `--source both` is
+        // expecting a second person, and silence is the one thing they cannot
+        // distinguish from working.
+        if !warned_about_one_channel
+            && source.uses_system()
+            && system_frames == 0
+            && started.elapsed() >= LONELY_MIC_AFTER
+        {
+            warned_about_one_channel = true;
+            let _ = notices.send(jay_ui::Line::notice(
+                "nothing has played through this Mac in 45 seconds, so the \
+                 'them' channel is empty. If the other person is on a call, it \
+                 is not running on this machine; if they are in the room, jay \
+                 cannot tell you apart and their questions will be archived as \
+                 yours."
+                    .to_string(),
+            ));
+        }
+
         let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(200)) else {
             continue;
         };
@@ -1233,32 +1268,8 @@ fn run_pipeline(
         let meter = levels.meter(frame.channel);
         meter.record(frame.rms());
 
-        match frame.channel {
-            Channel::System => system_frames += 1,
-            // Only frames loud enough to be somebody talking. A quiet room
-            // ticking past for 45 seconds is not evidence of anything.
-            Channel::Mic if frame.rms() >= jay_stt::SPEECH_PEAK_FLOOR => {
-                mic_speech_frames += 1;
-            }
-            Channel::Mic => {}
-        }
-
-        // Roughly thirty seconds of somebody talking into the microphone while
-        // the tap has delivered nothing at all.
-        if !warned_about_one_channel
-            && source.uses_system()
-            && started.elapsed() >= LONELY_MIC_AFTER
-            && system_frames == 0
-            && mic_speech_frames > 900
-        {
-            warned_about_one_channel = true;
-            let _ = notices.send(jay_ui::Line::notice(
-                "the system tap has heard nothing while you have been talking. \
-                 If the other person is in the room rather than on a call, jay \
-                 cannot tell you apart and every question will be archived as \
-                 yours."
-                    .to_string(),
-            ));
+        if frame.channel == Channel::System {
+            system_frames += 1;
         }
 
         let segmenter = match frame.channel {
