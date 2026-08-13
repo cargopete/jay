@@ -143,7 +143,12 @@ enum Command {
     /// tell you the switch bank came out reading "NUDGE ANSWER GIVES", which
     /// is a thing that shipped and was obvious the moment somebody looked.
     Demo {
-        /// Which moment to draw: empty, writing, or answered.
+        /// Which moment to draw: empty, writing, answered, or design.
+        ///
+        /// `design` is the one worth looking at after changing the design
+        /// prompt: jay does not draw diagrams, it hands over a Mermaid block
+        /// for Excalidraw, and how readable that is in a code well at panel
+        /// width is a question only eyes can answer.
         #[arg(long, default_value = "answered")]
         state: String,
     },
@@ -1561,7 +1566,15 @@ fn demo(state: &str) -> Result<()> {
         let _ = line_tx.send(line);
     }
 
-    if state == "writing" {
+    if state == "design" {
+        let _ = line_tx.send(jay_ui::Line::suggestion(
+            DEMO_DESIGN.to_string(),
+            Duration::from_secs(16),
+        ));
+        let _ = line_tx.send(jay_ui::Line::notice(
+            "16.2s · $0.168 · $0.17 this session".to_string(),
+        ));
+    } else if state == "writing" {
         // Half an answer, which is what the panel spends most of its ten
         // seconds drawing.
         let cut = DEMO_ANSWER.len() * 3 / 5;
@@ -1600,6 +1613,26 @@ fn demo(state: &str) -> Result<()> {
 
 /// A real answer, verbatim, so the panel is checked against what it will
 /// actually be asked to draw rather than against a convenient short string.
+/// A design answer, as the design round actually returns one.
+const DEMO_DESIGN: &str = r#"**1. Numbers.** 12 writes/s, 1500 reads/s: 125:1 read-heavy. Mean 30 KB against a 10 MB tail, so 45 MB/s out, 360 Mbit/s, one NIC. 20 GB/day. This is one machine's load; the second exists for failover.
+
+**2. Diagram.**
+
+```mermaid
+flowchart TD
+  C[Clients] -->|HTTPS| N[Nginx x2]
+  N -->|create paste| A[App servers x2]
+  N -->|GET slug| A
+  A -->|insert row| P[Postgres primary]
+  A -->|read paste| P
+  P -->|streaming replication| R[Postgres replica]
+  A -->|blobs over 1MB| F[Local NVMe]
+```
+
+**3. Components.** Nginx: TLS, 60s proxy_cache, serves hot pastes without touching the app. App: key generation, edit-token check, size limit. Primary: metadata and bodies under 1 MB as bytea. Replica: promotion candidate. NVMe: the 10 MB tail, by content hash.
+
+**4. Decisions.** Bodies under 1 MB in Postgres, above it on disk: one backup story for the common case, traded against a sweeper for orphaned files. 7-char random key with a UNIQUE constraint and retry: no coordinator, costs a rare wasted round trip. Cache is 60s TTL rather than purge-on-edit: edits go visible late, and nothing has to be invalidated."#;
+
 /// A q&a follow-up: prose, no code, no diagram. What the mode exists to give.
 const DEMO_FOLLOW_UP: &str = "O(rows x cols), and the proof is the marking \
 rule. A cell is looked at up to five times \u{2014} once by the outer sweep and once \

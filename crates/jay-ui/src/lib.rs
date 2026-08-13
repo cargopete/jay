@@ -11,6 +11,8 @@ use std::time::Instant;
 use crossbeam_channel::Receiver;
 use eframe::egui;
 
+mod flowchart;
+
 /// How many lines the panel keeps. Older ones scroll off and are forgotten by
 /// the UI; the transcript itself is not the UI's job to store.
 const MAX_LINES: usize = 200;
@@ -365,7 +367,36 @@ impl Overlay {
                     );
                     ui.add_space(4.0);
                 }
-                Block::Code(code) => {
+                // A diagram is drawn, not printed. The source stays one
+                // button away for Excalidraw, but eight lines of
+                // `A[Clients] -->|HTTPS| N[Nginx x2]` is a diagram somebody
+                // else has to render, and mid-interview nobody renders
+                // anything.
+                Block::Code { lang, body: code }
+                    if lang.eq_ignore_ascii_case("mermaid")
+                        && flowchart::parse(code).is_some() =>
+                {
+                    let chart = flowchart::parse(code).expect("just checked");
+                    egui::Frame::new()
+                        .fill(INSET)
+                        .stroke(egui::Stroke::new(1.0, SEAM))
+                        .inner_margin(8.0)
+                        .corner_radius(2.0)
+                        .show(ui, |ui| {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Min),
+                                |ui| {
+                                    if Self::copy_button(ui, "copy mermaid") {
+                                        ui.ctx().copy_text(code.to_string());
+                                    }
+                                },
+                            );
+                            flowchart::draw(ui, &chart, INK, BRASS, IRON_2, INK_FAINT);
+                        });
+                    ui.add_space(5.0);
+                }
+                Block::Code { lang, body: code } => {
+                    let _ = lang;
                     egui::Frame::new()
                         .fill(INSET)
                         .stroke(egui::Stroke::new(1.0, SEAM))
@@ -617,7 +648,9 @@ const CODE: f32 = 14.0;
 #[derive(Debug, PartialEq, Eq)]
 enum Block<'a> {
     Prose(&'a str),
-    Code(&'a str),
+    /// A fenced block and its language tag, which decides whether it is drawn
+    /// as code or as a picture.
+    Code { lang: &'a str, body: &'a str },
 }
 
 /// Split an answer on fenced code blocks.
@@ -635,15 +668,17 @@ fn split_blocks(text: &str) -> Vec<Block<'_>> {
         if !before.trim().is_empty() {
             blocks.push(Block::Prose(before.trim_matches('\n')));
         }
-        // Skip the fence and its language tag.
         let after = &after[3..];
-        let body = match after.find('\n') {
-            Some(nl) => &after[nl + 1..],
-            None => "",
+        let (lang, body) = match after.find('\n') {
+            Some(nl) => (after[..nl].trim(), &after[nl + 1..]),
+            None => ("", ""),
         };
         match body.find("```") {
             Some(close) => {
-                blocks.push(Block::Code(body[..close].trim_end_matches('\n')));
+                blocks.push(Block::Code {
+                    lang,
+                    body: body[..close].trim_end_matches('\n'),
+                });
                 rest = &body[close + 3..];
             }
             // An unterminated fence: everything left is code. Happens on every
@@ -651,7 +686,10 @@ fn split_blocks(text: &str) -> Vec<Block<'_>> {
             // written and the closing fence has not arrived yet.
             None => {
                 if !body.trim().is_empty() {
-                    blocks.push(Block::Code(body.trim_end_matches('\n')));
+                    blocks.push(Block::Code {
+                        lang,
+                        body: body.trim_end_matches('\n'),
+                    });
                 }
                 return blocks;
             }
@@ -993,7 +1031,7 @@ mod tests {
             split_blocks(answer),
             vec![
                 Block::Prose("**Approach:** walk it once."),
-                Block::Code("fn f() {}"),
+                Block::Code { lang: "rust", body: "fn f() {}" },
                 Block::Prose("O(n) time."),
             ]
         );
@@ -1010,7 +1048,24 @@ mod tests {
             split_blocks(partial),
             vec![
                 Block::Prose("Approach: walk it."),
-                Block::Code("fn f() {\n    let mut prev"),
+                Block::Code { lang: "rust", body: "fn f() {\n    let mut prev" },
+            ]
+        );
+    }
+
+    /// The language tag decides whether a block is printed or drawn, so it has
+    /// to survive the split.
+    #[test]
+    fn the_fence_language_is_kept() {
+        let answer = "Numbers.\n\n```mermaid\nflowchart TD\nA[a] --> B[b]\n```";
+        assert_eq!(
+            split_blocks(answer),
+            vec![
+                Block::Prose("Numbers."),
+                Block::Code {
+                    lang: "mermaid",
+                    body: "flowchart TD\nA[a] --> B[b]"
+                },
             ]
         );
     }
