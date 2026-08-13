@@ -238,7 +238,57 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
+/// Leave without running the C++ static destructors.
+///
+/// Every exit of jay used to abort. All three crash reports on this machine are
+/// identical and the assertion says exactly what it means:
+///
+/// ```text
+/// abort <- ggml_abort <- ggml_metal_rsets_free <- ggml_metal_device_free
+///       <- __cxa_finalize_ranges <- exit
+/// // note: if you hit this assert, most likely you haven't deallocated all
+/// // Metal resources before exiting
+/// ```
+///
+/// ggml frees its Metal device from a static destructor at `exit`, and asserts
+/// if any Metal resource is still outstanding. jay's whisper context is one:
+/// under the panel it lives on a pipeline thread that is never joined, because
+/// the windowing event loop owns the main thread and returns only when the
+/// window closes.
+///
+/// Joining it is not the fix, and that is worth knowing before someone tries.
+/// The terminal path *does* join its transcription thread and drop the model,
+/// and it aborted too. Something in the whisper context outlives the Rust value
+/// that appears to own it, so no amount of tidying on our side clears the
+/// assert.
+///
+/// So: do not run the finalisers. Nothing of jay's depends on them. The session
+/// archive is written with unbuffered `write` calls as each line arrives, and
+/// the only other output is the two streams flushed immediately below.
+fn quit(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` is async-signal-safe and always valid to call. It ends
+    // the process without unwinding, running atexit handlers, or finalising
+    // shared libraries, which is the entire point.
+    unsafe { libc::_exit(code) }
+}
+
+fn main() -> ! {
+    let code = match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            // Printed here rather than returned, because `quit` never gives
+            // the runtime a chance to report it.
+            eprintln!("Error: {e:?}");
+            1
+        }
+    };
+    quit(code)
+}
+
+fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -620,17 +670,17 @@ const PROBLEM_MIN_WORDS: usize = 9;
 /// per token for ten seconds.
 const PARTIAL_PAINT_INTERVAL: Duration = Duration::from_millis(120);
 
-/// Speech peak below which a transcript is treated as whisper inventing things.
-///
-/// Compared against [`Utterance::speech_peak`], never against the mean over the
-/// whole utterance. The mean includes ~250 ms of pre-roll and ~600 ms of
-/// trailing silence, so it scales with how long the pause afterwards was rather
-/// than with how loudly anyone spoke — which quietly binned a perfectly clear
-/// "reverse a linked list" on this machine, whose room floor measures 0.0028.
-///
-/// A single frame peak from a voice at a laptop's distance clears this by a
-/// wide margin. Room tone does not.
-const HALLUCINATION_FLOOR: f32 = 0.01;
+/// The opening of a line, for a notice that has to identify it without
+/// repeating the whole thing back.
+fn first_words(text: &str, count: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().take(count).collect();
+    let joined = words.join(" ");
+    if text.split_whitespace().count() > count {
+        format!("{joined}…")
+    } else {
+        joined
+    }
+}
 
 /// Settings for the half of jay that costs money.
 #[derive(Debug, Clone, Copy)]
@@ -1007,12 +1057,19 @@ fn run_pipeline(
             .context("spawning the hand-ask handler")?;
     }
 
+    // Kept back before the transcription thread takes ownership, so the
+    // capture loop can still reach the panel.
+    let notices = lines.clone();
+
     let worker = std::thread::Builder::new()
         .name("jay-stt".into())
         .spawn({
             let history = std::sync::Arc::clone(&history);
             let problem = std::sync::Arc::clone(&problem);
             let drain = std::sync::Arc::clone(&drain);
+            // Lives with the transcription thread, which is the only place that
+            // sees both channels in the order they were transcribed.
+            let mut echo = jay_agent::echo::EchoGuard::new();
             move || {
             for utterance in utterance_rx {
                 // Whatever happens below — transcribed, filtered, or failed —
@@ -1027,14 +1084,6 @@ fn run_pipeline(
                     }
                 };
 
-                if jay_stt::is_hallucination(&result.text) {
-                    tracing::debug!(text = %result.text, "dropped a whisper artefact");
-                    let _ = lines.send(jay_ui::Line::notice(
-                        "dropped a known whisper artefact".to_string(),
-                    ));
-                    continue;
-                }
-
                 // Lag measured from the first sample of the utterance, which
                 // is the number a listener would actually notice.
                 let lag = utterance.started_at.elapsed();
@@ -1043,30 +1092,74 @@ fn run_pipeline(
                     spoken = spoken.as_secs_f32(),
                     inference_ms = result.inference.as_secs_f32() * 1000.0,
                     rms = utterance.rms(),
+                    confidence = result.confidence,
                     "transcribed"
                 );
 
-                // Whisper invents fluent sentences out of near-silence, and in
-                // testing one of them ("That's a good cup of tea, eh?") ended
-                // in a question mark and triggered a paid escalation. A stock
-                // phrase list cannot catch novel inventions; the level of the
-                // audio can. Quiet in, distrusted out.
-                if utterance.speech_peak < HALLUCINATION_FLOOR {
+                // Every reason a transcript is binned lives in one place, so a
+                // reason added later cannot be silently skipped by a branch.
+                // Said out loud rather than logged: a session where everything
+                // is dropped must not look like a session where nobody spoke.
+                if let Some(rejected) = jay_stt::judge(&result, utterance.speech_peak) {
                     tracing::debug!(
-                        peak = utterance.speech_peak,
                         text = %result.text,
-                        "dropped a transcript from near-silent audio"
+                        peak = utterance.speech_peak,
+                        confidence = result.confidence,
+                        ?rejected,
+                        "dropped a transcript"
                     );
-                    // Say so. This used to be a debug log and nothing else,
-                    // which meant a session where every utterance was binned
-                    // looked precisely like a session where nobody spoke.
-                    let _ = lines.send(jay_ui::Line::notice(format!(
-                        "heard {:.1}s at peak {:.4} — too quiet to trust, dropped",
-                        spoken.as_secs_f32(),
-                        utterance.speech_peak
-                    )));
+                    let _ = lines.send(jay_ui::Line::notice(rejected.notice(spoken)));
                     continue;
                 }
+
+                // The other person's voice, back through your microphone: the
+                // same sentence twice, with one copy blamed on you, spent as
+                // context if nobody stops it.
+                //
+                // Which copy arrives first is not a fact anyone can rely on —
+                // it depends on utterance length rather than on when the sound
+                // happened, and both orders have been observed on this machine
+                // an hour apart. So the *channel* decides, never the order. The
+                // system tap did not cross a room, so it is always the one kept
+                // and the microphone copy is always the one that goes.
+                let label = utterance.channel.label();
+                match utterance.channel {
+                    // Microphone copy, interviewer's voice already recorded.
+                    Channel::Mic if echo.is_echo(utterance.started_at, label, &result.text) => {
+                        tracing::debug!(text = %result.text, "dropped an echo of the system channel");
+                        let _ = lines.send(jay_ui::Line::notice(
+                            "dropped an echo of the other channel — wear headphones".to_string(),
+                        ));
+                        continue;
+                    }
+                    // System copy, arriving after the microphone won the race.
+                    // Keep this one and retract the copy already recorded.
+                    Channel::System => {
+                        let mut history = history.lock().expect("transcript history poisoned");
+                        // `make_contiguous` rather than `as_slices().0`, which
+                        // searches only up to the ring buffer's wrap point and
+                        // would quietly stop finding things after 600 lines.
+                        let lines_so_far = history.make_contiguous();
+                        if let Some(index) =
+                            echo.stale_copy(lines_so_far, Channel::Mic.label(), &result.text)
+                        {
+                            history.remove(index);
+                            // Named rather than merely announced, because the
+                            // archive is written as lines arrive and cannot be
+                            // edited afterwards: the `you:` copy stays on disk
+                            // even though it has left the context. Whoever
+                            // reads the file back — including `jay ask --mode
+                            // rehearsal` — needs to be told which line it was.
+                            let _ = lines.send(jay_ui::Line::notice(format!(
+                                "the earlier \"you\" copy of \"{}\" was this room, not you; \
+                                 dropped from context",
+                                first_words(&result.text, 8)
+                            )));
+                        }
+                    }
+                    Channel::Mic => {}
+                }
+                echo.remember(utterance.started_at, label, &result.text);
 
                 // The first substantial thing the interviewer says is the
                 // problem. Captured once and kept for the whole session.
@@ -1115,6 +1208,20 @@ fn run_pipeline(
     let unlimited = seconds == 0;
     let mut skipped_utterances = 0u64;
 
+    // Both voices arriving on the microphone is not a fault jay can fix, and it
+    // ruins everything downstream: attribution collapses, the problem statement
+    // never gets pinned because pinning only fires on the system channel, and
+    // the interviewer's questions are archived as things the candidate said. It
+    // happens when the two people are in the same room rather than on a call.
+    //
+    // The meters have always shown it, reading QUIET beside a busy `you`. That
+    // was not enough — a whole session was lost to it — so jay now says it in
+    // words, once, after long enough that a genuine pause cannot trigger it.
+    let mut system_frames = 0u64;
+    let mut mic_speech_frames = 0u64;
+    let mut warned_about_one_channel = false;
+    const LONELY_MIC_AFTER: Duration = Duration::from_secs(45);
+
     println!("transcribing {source:?} audio with {model}.\n");
 
     while unlimited || started.elapsed() < Duration::from_secs(seconds) {
@@ -1125,6 +1232,34 @@ fn run_pipeline(
         // arrived rather than what survived the VAD.
         let meter = levels.meter(frame.channel);
         meter.record(frame.rms());
+
+        match frame.channel {
+            Channel::System => system_frames += 1,
+            // Only frames loud enough to be somebody talking. A quiet room
+            // ticking past for 45 seconds is not evidence of anything.
+            Channel::Mic if frame.rms() >= jay_stt::SPEECH_PEAK_FLOOR => {
+                mic_speech_frames += 1;
+            }
+            Channel::Mic => {}
+        }
+
+        // Roughly thirty seconds of somebody talking into the microphone while
+        // the tap has delivered nothing at all.
+        if !warned_about_one_channel
+            && source.uses_system()
+            && started.elapsed() >= LONELY_MIC_AFTER
+            && system_frames == 0
+            && mic_speech_frames > 900
+        {
+            warned_about_one_channel = true;
+            let _ = notices.send(jay_ui::Line::notice(
+                "the system tap has heard nothing while you have been talking. \
+                 If the other person is in the room rather than on a call, jay \
+                 cannot tell you apart and every question will be archived as \
+                 yours."
+                    .to_string(),
+            ));
+        }
 
         let segmenter = match frame.channel {
             Channel::Mic => &mut mic_segmenter,
@@ -1662,7 +1797,12 @@ fn listen(
         }
     }
 
-    let expected = seconds * u64::from(SAMPLE_RATE) / jay_audio::FRAME_SAMPLES as u64;
+    // Once per channel. Counting frames across both while expecting one
+    // channel's worth made a perfectly healthy `--source both` run report a 75%
+    // over-delivery, which reads as a fault rather than as arithmetic.
+    let channels = u64::from(mic_capture.is_some()) + u64::from(system_capture.is_some());
+    let expected =
+        channels * seconds * u64::from(SAMPLE_RATE) / jay_audio::FRAME_SAMPLES as u64;
     println!();
     println!("frames delivered : {frames} (expected roughly {expected})");
     println!("peak rms         : {peak_rms:.5}");

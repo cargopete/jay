@@ -305,9 +305,22 @@ Measured on an M3 Pro, driving a Max subscription.
 | | |
 | --- | --- |
 | Spawn, preamble and one round trip | 4.7s — the floor, before any answer |
-| A hint | ~5s, ~$0.14 |
+| A hint | ~5s, ~$0.18 |
 | A coding answer with working Rust | ~9s, ~$0.19, first words at ~5s |
-| Idle, listening | 12–25% of one core, ~19 MB |
+| A design answer | ~16s, ~$0.20 |
+| A rehearsal debrief | ~53s, ~$0.28 — uncapped by design, run after the round |
+| Idle, listening | ~0.2% of one core, 1.87 GB resident |
+
+A hint is roughly twice as fast as a coding answer and three times as fast as a
+design one, and barely cheaper than either, because the preamble below dominates
+the bill whatever you ask for. Buy hints for the tempo, not for the money.
+
+That resident figure is almost entirely `medium.en`, and it is the number to
+plan a laptop around: 1.87 GB, flat to the megabyte across a twenty minute run
+with no leak and no growth. Idle cost is otherwise nil — two tenths of one core
+in a silent room, because the VAD does almost nothing until somebody speaks.
+Drop to `--model small` if you need the gigabyte back and can accept
+"**Write**, so" for "Right, so".
 
 That coding figure was 77 seconds until the prompt was given a hard length
 cap. Latency here is almost entirely output length: the model is not thinking
@@ -316,8 +329,14 @@ aside about what the interviewer might prefer is not a better answer to read
 mid-interview, and it costs a minute.
 
 Every `claude -p` call carries roughly 29,000 tokens of the CLI's own preamble
-regardless of how small your question is: $0.0254 on a cold cache, $0.0033 once
-warm, for a one-word answer. That single fact shaped the design. It is why jay
+regardless of how small your question is: $0.0033 once warm for a one-word
+answer, and on a cold cache anywhere from $0.0254 to $0.0590 — three runs of
+`jay check` on this machine gave $0.0254, $0.0590 and $0.0260, with no change to
+jay between them. The spread is real and it is not a trend, so budget for the
+high end and do not read one cheap run as a saving. The preamble belongs to the
+CLI rather than to jay and moves under you, so treat every figure on this page
+as the right order of magnitude and re-measure before you trust one. That single
+fact shaped the design. It is why jay
 has no model deciding when to speak — such a gate would run about $0.40 an hour
 to answer yes or no — and why a button is the trigger instead.
 
@@ -350,6 +369,14 @@ has no terminal to log to, so the panel simply sat there looking ready.
 **Two jay windows.** Don't. Two instances contend for the microphone and both
 lose frames — measured at 222 of an expected 281 while sharing.
 
+**A debug build hears nothing while the release build is fine.** Permission is
+attached to the binary, not to the project, so `target/debug/jay` is a stranger
+to macOS however many times you have granted `target/release/jay`. Observed in
+the same minute: 498 frames of an expected 500 from the release binary, and 0
+of 375 from the debug one, with no error from either. Test capture with the
+release build, or grant the debug binary separately and expect to do it again
+after `cargo clean`.
+
 **Every question appears twice, once as `you:`.** Echo. The other person's
 voice leaves your speakers and returns through your microphone, so it is
 captured on both channels and one copy is blamed on you. Reproduced here
@@ -362,6 +389,15 @@ exactly:
 
 **Wear headphones.** This is not a tuning problem, it is a room.
 
+jay now notices anyway. A line matching one from the other channel within four
+seconds is dropped as an echo, and the copy kept is always the one from the
+system tap, since that is the audio that did not cross a desk. If the microphone
+copy was transcribed first and is already recorded, it is retracted from the
+context by name. Nothing under eight words is ever treated as an echo, because
+both people say "okay, yeah, that sounds right" constantly and editing a
+conversation on that basis would be the worse fault. None of which is a reason
+not to wear headphones.
+
 **"still thinking about the last one".** One suggestion runs at a time, by
 design: the alternative is the transcriber stalling behind it and losing audio.
 
@@ -370,6 +406,44 @@ for the subtitled video it was trained on — "I'll see you next time" appeared 
 90 seconds of an empty room. Known artefacts are filtered and transcripts whose
 audio was never loud enough to be speech are dropped, but some get through.
 Both kinds of drop now say so in the panel rather than only in a debug log.
+
+Enough get through to matter. Thirty seconds of a silent room, on the `you`
+channel, archived these two as things you said:
+
+```
+[00:21] you: -To us, Adam wanted to speak to us. -It's testing.
+[00:24] you: Cool? Distinct.
+```
+
+That is the failure worth caring about, because a fabricated `you:` line is not
+merely noise in the transcript — it is spent as context on the next press, and
+the model has no way to know you never said it.
+
+**They come from your speakers, not from silence.** This was measured both ways.
+Twelve minutes of a real room with nothing playing produced an empty transcript
+— not one invented line. Thirty seconds with the interviewer's question coming
+out of the speakers produced four, all blamed on the candidate. It is the same
+bleed that duplicates the question, one notch more degraded: when the microphone
+copy transcribes faithfully you get the question twice, and when it does not you
+get this.
+
+**So headphones are not advice, they are the fix.** Nothing else here comes
+close.
+
+There is a third filter behind the phrase list and the level floor — the mean
+probability of the tokens whisper emitted, rejected below 0.45 — and you should
+know what it does not do. Measured on the run above, the invented lines scored
+0.71 and 0.82 while the real question scored 0.87. A floor high enough to catch
+them bins real speech. It stays because it is free and it catches the genuinely
+unbelieved, but it is a backstop, not a solution.
+
+So: read the conversation pane before you press, and treat a line you do not
+recognise as a reason to press later rather than now.
+
+The signal that *should* do this job, whisper's own `no_speech_prob`, is dead on
+the English-only weights jay uses — it reads 0.00 even for eight seconds of pure
+digital silence, because it is the probability of a token an `.en` vocabulary
+never predicts. It is recorded and ignored rather than quietly trusted.
 
 **You spoke and nothing appeared.** Watch the `you` meter. If it moves and says
 `SPEECH`, jay heard you and the fault is downstream — look for a
@@ -380,7 +454,7 @@ stopped. If it says `OFF`, that channel was never started, so check `--source`.
 interviews and of Rust, which is the difference between "reverse a singly
 linked list" and "reverse the link please" — both real transcripts of the same
 sentence, before and after. Add anything specific to your round with
-`--vocab "SiloBin, Redpanda, Kademlia"`. `--model small` is the default and the
+`--vocab "SiloBin, Redpanda, Kademlia"`. `--model medium` is the default and the
 best wired up.
 
 ---
@@ -394,6 +468,14 @@ latency. Nine test suites.
 The button has been pressed, twice, and did the right thing both times: looked
 at an empty screen, said there was no problem to work on, and declined to
 invent one.
+
+Rebuilt from a clean clone and put through every command that does not need a
+second person: preflight green on all five lines, `medium.en` fetched and
+decoding a jargon-heavy sentence verbatim at 11.5× real time, both channels
+capturing with zero dropped samples and 340µs worst queue lag, the system tap
+proven with real audio, all five modes answering in their documented shape, and
+the Rust from a `coding` answer compiled and passed a test written against it,
+empty list included.
 
 Still not exercised: **a real conversation**. There has been no forty-minute
 run and no session with two people in it. jay has never transcribed a live

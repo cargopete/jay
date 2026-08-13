@@ -12,5 +12,7 @@ jay-agent = { version = "0.1.0", path = "../jay-agent" }
 jay-audio.workspace = true
 jay-stt.workspace = true
 jay-ui.workspace = true
+# Only for `_exit`. See `quit` in main.rs for why leaving normally aborts.
+libc = "0.2"
 tracing.workspace = true
 tracing-subscriber.workspace = true

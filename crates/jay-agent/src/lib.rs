@@ -17,6 +17,7 @@ pub mod archive;
 pub mod brief;
 pub mod claude;
 pub mod context;
+pub mod echo;
 pub mod gate;
 pub mod screen;
 
@@ -205,12 +206,19 @@ impl Mode {
             Mode::Pairing => {
                 "You are the second engineer in a pairing session. Be concrete, \
                  be brief, and have an opinion. Say the useful thing, not the \
-                 complete thing."
+                 complete thing.\n\n\
+                 Hard limit: under 100 words of prose outside any code. No \
+                 preamble, no summary, no survey of alternatives."
             }
             Mode::Dev => {
                 "You are watching a developer work. Something just went wrong. \
                  Say what is most likely responsible and what to check first. \
-                 Be specific and brief. Say plainly when you cannot tell."
+                 Be specific and brief. Say plainly when you cannot tell.\n\n\
+                 Hard limit: under 80 words, and at most two things to check, \
+                 ordered so the first one distinguishes between the causes. \
+                 This is read while a test is red and the person is already \
+                 mid-thought; a second cause they will not get to is a second \
+                 cause not worth generating."
             }
         }
     }

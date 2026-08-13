@@ -8,3 +8,7 @@ thiserror.workspace = true
 tracing.workspace = true
 ureq = "3.4.0"
 whisper-rs = { version = "0.16.0", features = ["metal", "tracing_backend"] }
+
+[dev-dependencies]
+# Only to read back the control utterance `say` writes in tests/silence.rs.
+hound = "3.5.1"

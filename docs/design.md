@@ -695,3 +695,293 @@ flawed attempt it found a `usize` underflow in a bounds check that had been
 stated out loud and passed unremarked, and told the candidate that naming a
 failure mode without offering the fix "reads as luck". That is the mode
 earning its place.
+
+## Every reason to bin a transcript now lives in one place
+
+There were two filters, in two `continue`s, thirty lines apart: the artefact
+list and the silence floor. A third was wanted, and the shape of the code was
+already arguing against it — each check carried its own `tracing` call, its own
+panel notice, and its own opportunity for a branch added later to skip the lot.
+
+They are now one function, `jay_stt::judge`, returning `Option<Rejected>`, with
+the notice text hanging off the reason. The capture loop asks once. A reason
+added tomorrow cannot be silently bypassed, and the panel wording for each lives
+next to the rule that produces it rather than at the call site.
+
+## The decoder's own doubt, and the signal that turned out to be dead
+
+Thirty seconds of a silent room, on a machine that had just played audio,
+archived two sentences nobody said:
+
+```
+[00:21] you: -To us, Adam wanted to speak to us. -It's testing.
+[00:24] you: Cool? Distinct.
+```
+
+Neither is on any phrase list and neither was quiet — they cleared the speech
+floor comfortably, because the room has a fan in it. A blocklist is a losing
+race against a model that invents novel fluent English, so the obvious move is
+to stop guessing and ask whisper how much it believed itself.
+
+whisper.cpp offers exactly that, per segment: `no_speech_prob`. It reads 0.00 on
+`medium.en` for everything, including eight seconds of pure digital silence,
+which is the strongest no-speech case that can exist. The reason is in the
+implementation: the field is the probability of the `<|nospeech|>` token, and an
+English-only vocabulary effectively never predicts it. A gate on that number is
+a gate that never closes, which is the same class of fault as a warning light
+that is on during normal operation, and worse, because it looks like diligence.
+
+So it is read, reported, documented and **not** acted on. What is acted on is
+the mean probability of the tokens actually emitted, which is live: `say`
+speech decodes at 0.88, digital silence captioned "Thank you for watching."
+at 0.48.
+
+The floor is set at 0.45, which is low, and deliberately. Confidence does not
+separate noise from speech on its own — whisper labels white noise `[static]`
+with 0.88 confidence, exactly the score real speech gets — so it is a backstop
+behind the artefact list and the level floor, sized to err toward keeping a
+quiet real sentence rather than binning one.
+
+`crates/jay-stt/tests/silence.rs` holds the corpus and states plainly what it
+does not yet prove. Every rejection in it comes from the artefact list, because
+whisper hears synthetic noise for what it is; even forty seconds of a real
+recorded room produced only `(music)` and `(video plays)`. The fluent case
+appears to need what the live pipeline does — short VAD-triggered snippets with
+pre-roll, arriving just after real speech stopped — and until a session yields a
+corpus of those, the confidence floor is an untested backstop rather than a fix.
+Point the test at your own room with `JAY_ROOM_TONE=room.wav`.
+
+## The room is not a tuning problem, but it can still be undone
+
+Without headphones the interviewer's voice leaves the speakers, crosses the
+desk and arrives at the microphone, so the same sentence is captured on both
+channels and one copy is blamed on the candidate. Wearing headphones remains the
+fix. Advice, however, is not a mechanism, and the cost of the room winning is
+not cosmetic: the duplicate is spent as context, and a model reading it sees
+somebody parroting the interviewer word for word.
+
+`EchoGuard` holds the last four seconds of kept lines and drops a line that
+matches a recent line *from the other channel*. Three details are load-bearing:
+
+**Order decides nothing; the channel decides.** Both orders have been observed
+on this machine an hour apart, because which copy is transcribed first depends
+on utterance length rather than on when the sound happened. So the system tap
+always wins — it did not cross a room — and the microphone copy always goes. If
+the microphone copy got there first it is retracted from the context, by name,
+because the archive is written as lines arrive and cannot be edited afterwards.
+
+**Similarity is measured over the shorter line, not the union.** The microphone
+copy is a degraded one. Observed live: the tap heard "An island is a group of
+ones connected horizontally or vertically" while the microphone heard "Loop of
+ones connected horizontally or vertically". Over the union those score 0.55 and
+the echo survives; over the shorter line they score 0.86 and it does not.
+
+**Nothing under eight words is ever an echo.** Both people say "okay, yeah, that
+sounds right" constantly and identically, and silently editing a conversation on
+the strength of five common words is a worse failure than the one being fixed.
+Eight is one above `context::FILLER_MAX_WORDS`, so the two mechanisms meet
+rather than overlap: anything shorter is already dropped as filler before it
+costs anything.
+
+## What it actually costs to leave running
+
+The README carried "~19 MB" for a listening session, which was wrong by two
+orders of magnitude and had no measurement behind it anywhere. A twenty minute
+soak with both channels open reads **1.87 GB resident, flat**, and two tenths of
+one core.
+
+Both halves of that are worth knowing. The gigabyte and three quarters is
+`medium.en` and nothing else, so it moves with the model and not with the length
+of the session — there is no leak, and the figure did not shift by a megabyte
+between the first sample and the last. The near-zero CPU is the VAD doing its
+job: in a silent room nothing reaches whisper, so nothing is decoded.
+
+It matters because a laptop in an interview is also running a browser, a call
+and an editor, and 1.87 GB is a real share of that. `--model small` returns
+about a gigabyte at the price documented under transcription.
+
+## Permission is attached to the binary, not to the project
+
+`target/debug/jay` and `target/release/jay` are two different applications as
+far as macOS is concerned, and a grant given to one means nothing to the other.
+Measured within the same minute, with the same room and the same command: 498
+frames of an expected 500 from the release binary, and 0 of 375 from the debug
+one. Neither reported an error.
+
+This is the same trap as the denied microphone returning silence, one level up,
+and it is easy to lose an hour to after a `cargo clean`. Capture is tested with
+the release build.
+
+## Counting two channels against one channel's expectation
+
+`jay listen --source both` reported "frames delivered : 545 (expected roughly
+312)", because the count spanned both channels while the expectation was
+computed for one. A healthy run therefore read as a 75% over-delivery, which is
+precisely the kind of number that sends somebody looking for a fault that is not
+there. The expectation is now multiplied by the number of channels actually
+opened: 498 of 500.
+
+## The fabrications are not from silence, they are from the speakers
+
+The received story here — whisper invents from silence, so gate on level and on
+the decoder's own doubt — turns out to be wrong about this machine, and it took
+a controlled pair of runs to see it.
+
+**Twelve minutes of a real room, nothing playing: the transcript is empty.** Not
+one invented line. Whatever the phrase list and the level floor are doing, they
+are not being tested by an idle room, because an idle room produces nothing to
+test them with.
+
+**Thirty seconds with the interviewer's question played through the speakers:
+four invented lines**, all attributed to the candidate.
+
+```
+[00:19] you: I didn't drink no coals.
+[00:22] you: E mi da?
+[00:29] you: Amortised and...
+[00:33] you: The moral of the French logic is this,
+```
+
+So the source is not silence. It is the other person's voice arriving at the
+microphone across a desk, quiet and smeared, and being decoded into fluent
+English that has nothing to do with what was said. The same mechanism as the
+duplicate-question echo, one notch further degraded: when the bleed transcribes
+faithfully you get the question twice, and when it does not you get this.
+
+Which also explains why text similarity cannot catch it. `EchoGuard` compares
+words, and "I didn't drink no coals" shares none with "an island is a group of
+ones connected horizontally or vertically". There is nothing to match.
+
+And confidence cannot catch it either. Measured on the run above:
+
+| | mic RMS | confidence |
+| --- | --- | --- |
+| invented, from bleed | 0.0216 | 0.71 |
+| invented, from bleed | 0.0271 | 0.82 |
+| the real question, on the tap | 0.1030 | 0.87 |
+
+A floor set high enough to reject 0.82 rejects real speech at 0.87 the same
+afternoon. The confidence check stays as a cheap backstop for the genuinely
+unbelieved — digital silence captioned "Thank you for watching." scores 0.48 —
+but it is not the fix for this and must not be described as one.
+
+The number that does separate them is in the left column, and it is a *ratio*
+rather than a level: the bleed is three to five times quieter than the source,
+and it arrives while the system channel is itself mid-utterance. A cross-channel
+rule — a microphone utterance overlapping a system utterance and substantially
+quieter than it is bleed — would catch all four, and would not have needed the
+transcript at all.
+
+That is deliberately not built yet. It can silently discard the candidate
+interrupting the interviewer, which is a worse failure than four visible lines
+of nonsense, and calibrating the ratio needs two real people in a real call
+rather than a laptop playing a WAV at itself. It is the next change, and the
+first live session is what it is waiting for.
+
+Until then the honest instruction is the one the README already gives, promoted
+from advice to prerequisite: **wear headphones**. It removes the loudest source
+of this by a wide margin.
+
+### Correction, the same day
+
+"With no bleed there are no fabrications" was too strong, and a later run
+disproved it: sixty seconds in a room with nothing playing produced six invented
+lines, among them "Jeff, you are not a nerd" and "You're kind of a scammer".
+
+The variable is not the speakers. It is whether anything trips the VAD at all.
+The twelve minute soak was clean because the room was quiet enough that no
+utterance ever reached whisper; the sixty second run was not. Speaker bleed is
+the most reliable way to trip it, which is why it produces fabrications so
+consistently, but a fridge, a fan or a chair will do the same job.
+
+The rule that survives both observations: **whisper invents whenever it is
+handed audio that is not speech**, and everything upstream of it is a question
+of how often that happens.
+
+A second hypothesis died the same afternoon. Given that `--vocab` had been
+supplied in the noisy run and not in the clean soak, priming looked like a
+plausible cause — a list of words to reach for. Measured directly, on the same
+recorded room audio, primed against bare: four chunks each, zero survivors
+either way. Priming is not implicated. `tests/silence.rs` keeps that measurement
+so the idea does not have to be re-had.
+
+## The transcriber reciting its own prompt
+
+Priming does have exactly one failure mode of its own, and it is not the above.
+From a live session, on a channel with nothing on it:
+
+```
+[00:12] them: Redis  Kafka
+[00:20] them: Redis  Kafka
+```
+
+Nobody said that. The session was primed with `--vocab "… Redis, Kafka"` and the
+decoder handed the prompt back. These clear every other filter — not a known
+artefact, not quiet, and decoded *confidently*, because copying is easier than
+guessing.
+
+`is_prompt_echo` rejects a transcript whose every word appears in the priming
+prompt in the prompt's own order. The first attempt required a contiguous run
+and was beaten within one test run by `Postgres  nginx  Kafka`, which skips
+"Redis" out of the middle of the list it is reciting. Order is the discriminator
+that holds: a vocabulary list's order is arbitrary, so reproducing it is not
+something speech does by accident, while real speech using those words puts its
+own words between them.
+
+Two words minimum. The cost is that somebody who says nothing but "Postgres,
+Redis" in that order loses it, which is two words nobody could have acted on.
+
+## The subtitle dash
+
+`- (speaking in foreign language)` walked through the bracketed-marker check on
+a live session, because the check asked whether the line *starts* with a bracket
+and this one starts with the dash that introduces a speaker turn in subtitles.
+The same training data that supplies "I'll see you next time" supplies the dash.
+Leading dashes and full stops are now trimmed before the test.
+
+## Every exit aborted
+
+Three crash reports, three identical stacks, one line of explanation from ggml:
+
+```
+abort <- ggml_abort <- ggml_metal_rsets_free <- ggml_metal_device_free
+      <- __cxa_finalize_ranges <- exit
+
+// note: if you hit this assert, most likely you haven't deallocated all
+// Metal resources before exiting
+```
+
+ggml frees its Metal device from a static destructor at `exit` and asserts if
+any Metal resource is outstanding. jay's whisper context is one. Under the panel
+it lives on a pipeline thread that is never joined, because the windowing event
+loop owns the main thread and only returns once the window has closed.
+
+The obvious fix is to join that thread, and it is the wrong one. The terminal
+path *already* joins its transcription thread and drops the model, and it
+aborted too — so something in the whisper context outlives the Rust value that
+appears to own it, and no amount of tidying on jay's side clears the assert.
+
+So jay leaves through `_exit`, which ends the process without running atexit
+handlers or finalising shared libraries. Nothing of jay's depends on them: the
+session archive is written with unbuffered writes as each line arrives, and the
+two output streams are flushed immediately before.
+
+It never affected a running session. It did mean every single quit produced a
+crash report, which is precisely the sort of thing that trains somebody to
+ignore crash reports.
+
+## Two people in one room
+
+The worst session yet was not a bug. Both people sat side by side rather than on
+a call, so both voices arrived on the microphone, and everything downstream that
+depends on two channels quietly stopped meaning anything: attribution collapsed
+onto `you:`, the interviewer's questions were archived as the candidate's, and
+the problem statement was never pinned, because pinning only fires on the system
+channel.
+
+The meters showed it the whole time — `them` reading QUIET beside a busy `you` —
+and that was not enough, because a meter tells you a number and not what the
+number implies. After 45 seconds of somebody talking into the microphone with
+zero frames ever delivered by the tap, jay now says it in words. Once, and only
+with `--source both`, and only after long enough that a genuine pause between
+questions cannot trigger it.

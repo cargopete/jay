@@ -5,14 +5,32 @@ Everything here has been run against the real prompt path.
 
 ## Before she joins
 
-**Headphones on.** Not optional. Her voice leaving your speakers and returning
-through your microphone is captured on both channels, so every question lands
-twice with one copy blamed on you. Reproduced, exactly:
+**Headphones on.** Not optional, and it is the single most important line in
+this document. Her voice leaving your speakers and returning through your
+microphone is captured on both channels, and it fails in two ways.
+
+When the microphone copy transcribes cleanly, every question lands twice with
+one copy blamed on you. jay now catches that one and drops the microphone copy:
 
 ```
 [00:11] them: Given a two-dimensional grid of ones and zeros, find the largest island by area.
 [00:11] you:  Given a two-dimensional grid of ones and zeros, find the largest island by area.
 ```
+
+When it does not transcribe cleanly — which is the commoner case, since the
+sound has crossed a desk — you get fluent invented English attributed to you,
+and nothing catches it, because there is no duplicate to match against. Thirty
+seconds of a played question produced four:
+
+```
+[00:19] you: I didn't drink no coals.
+[00:22] you: E mi da?
+[00:29] you: Amortised and...
+[00:33] you: The moral of the French logic is this,
+```
+
+Twelve minutes of the same room with the speakers silent produced nothing at
+all. That is the whole argument for headphones in two measurements.
 
 Then, with something playing so the tap has audio to capture:
 

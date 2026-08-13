@@ -149,17 +149,47 @@ impl SpeechModel for Whisper {
             .map_err(|e| SttError::Whisper(e.to_string()))?;
 
         let mut text = String::new();
+        // Worst segment rather than the mean: one confidently-invented segment
+        // in an otherwise real utterance is still a sentence nobody said.
+        let mut no_speech = 0.0f32;
+        let mut prob_total = 0.0f32;
+        let mut prob_count = 0usize;
+
         for i in 0..self.state.full_n_segments() {
-            if let Some(segment) = self.state.get_segment(i)
-                && let Ok(s) = segment.to_str_lossy()
-            {
+            let Some(segment) = self.state.get_segment(i) else {
+                continue;
+            };
+            if let Ok(s) = segment.to_str_lossy() {
                 text.push_str(&s);
+            }
+            no_speech = no_speech.max(segment.no_speech_probability());
+            for t in 0..segment.n_tokens() {
+                if let Some(token) = segment.get_token(t) {
+                    prob_total += token.token_probability();
+                    prob_count += 1;
+                }
             }
         }
 
+        let text = text.trim().to_string();
+
+        // Against the prompt actually used, so a session primed with
+        // `--vocab` is checked against its own words rather than the defaults.
+        let prompt_echo = crate::is_prompt_echo(&text, self.vocabulary);
+
         Ok(Transcription {
-            text: text.trim().to_string(),
+            prompt_echo,
+            text,
             inference: started.elapsed(),
+            no_speech,
+            // No tokens means no text, which the artefact check rejects on its
+            // own. Claiming full confidence here keeps this field from being
+            // the thing that decides an empty transcript.
+            confidence: if prob_count == 0 {
+                1.0
+            } else {
+                prob_total / prob_count as f32
+            },
         })
     }
 
