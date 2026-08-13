@@ -227,20 +227,45 @@ int jay_system_tap_start(JayTapCallback callback,
             return (int)status;
         }
 
-        // Ask the tap what rate it is running at, so Rust can resample
+        // What rate the frames actually arrive at, so Rust can resample
         // correctly rather than assuming 48 kHz and being subtly wrong.
-        AudioStreamBasicDescription format = {0};
-        UInt32 size = sizeof(format);
-        AudioObjectPropertyAddress formatAddress = {
-            .mSelector = kAudioTapPropertyFormat,
+        //
+        // Ask the *aggregate device*, not the tap. The tap has a format of its
+        // own and cheerfully reports 48 kHz while the IOProc below is fed by the
+        // aggregate, which follows its main sub-device. Bluetooth headphones
+        // that are also the default input run the hands-free profile at 16 kHz
+        // mono, and the difference is not subtle: taking the tap's 48 kHz meant
+        // resampling 16 kHz audio as though it were 48 kHz, which discards two
+        // samples in three and drops what survives an octave and a half. It
+        // measured as exactly 114 delivered frames of an expected 343, twice,
+        // and it made the other person unintelligible rather than merely quiet.
+        Float64 deviceRate = 0.0;
+        UInt32 size = sizeof(deviceRate);
+        AudioObjectPropertyAddress rateAddress = {
+            .mSelector = kAudioDevicePropertyNominalSampleRate,
             .mScope = kAudioObjectPropertyScopeGlobal,
             .mElement = kAudioObjectPropertyElementMain,
         };
-        if (AudioObjectGetPropertyData(tap->tap, &formatAddress, 0, NULL, &size, &format) == noErr
-            && format.mSampleRate > 0) {
-            tap->sampleRate = format.mSampleRate;
+        if (AudioObjectGetPropertyData(tap->aggregate, &rateAddress, 0, NULL, &size, &deviceRate)
+                == noErr
+            && deviceRate > 0) {
+            tap->sampleRate = deviceRate;
         } else {
-            tap->sampleRate = 48000.0;
+            // Fall back to the tap's own idea, then to the common case.
+            AudioStreamBasicDescription format = {0};
+            UInt32 formatSize = sizeof(format);
+            AudioObjectPropertyAddress formatAddress = {
+                .mSelector = kAudioTapPropertyFormat,
+                .mScope = kAudioObjectPropertyScopeGlobal,
+                .mElement = kAudioObjectPropertyElementMain,
+            };
+            if (AudioObjectGetPropertyData(tap->tap, &formatAddress, 0, NULL, &formatSize, &format)
+                    == noErr
+                && format.mSampleRate > 0) {
+                tap->sampleRate = format.mSampleRate;
+            } else {
+                tap->sampleRate = 48000.0;
+            }
         }
 
         status = AudioDeviceCreateIOProcID(tap->aggregate, JayTapIOProc, tap, &tap->ioProc);
