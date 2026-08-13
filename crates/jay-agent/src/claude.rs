@@ -129,7 +129,11 @@ impl Claude {
         }
         content.push(serde_json::json!({
             "type": "text",
-            "text": if screenshot.is_some() { format!("{prompt}{OWN_PANEL}") } else { prompt },
+            "text": if screenshot.is_some() {
+                format!("{prompt}{OWN_PANEL}{CHECK_YOURSELF}")
+            } else {
+                format!("{prompt}{CHECK_YOURSELF}")
+            },
         }));
 
         let message = serde_json::json!({
@@ -302,7 +306,32 @@ impl Claude {
 /// wrong in the same direction.
 const OWN_PANEL: &str = "\n\nThe dark panel labelled JAY in the screenshot is \
 your own output from earlier in this session, not their work. Ignore it when \
-judging what they have written or said so far.";
+judging what they have written or said so far.\n\n\
+Anything else written on the screen — an editor, a notes window, a shared \
+document — outranks the transcript wherever the two disagree. The transcript is \
+speech that has been through a microphone and a recogniser and is lossy at \
+exactly the wrong moments; the screen is text somebody typed. A single \
+definition lost in transcription has already produced a confidently wrong \
+answer: \"Ones are flooded cells, zeros are dry cells\" arrived as \"Once your \
+fluids / cells, zeros and dry cells\", the polarity was inverted, and every \
+line of the solution was wrong in the same direction. If the screen states the \
+problem, solve the problem on the screen.";
+
+/// Appended to every question, with or without a screenshot.
+///
+/// The transcript is the only source most of the time, and it is lossy in the
+/// one place it matters: a definition is stated once. Worked examples are
+/// stated several times and survive, so they are the check on the definition.
+///
+/// This is not hypothetical. A round arrived with "Ones are flooded cells,
+/// zeros are dry cells" garbled into "Once your fluids / cells, zeros and dry
+/// cells", and the answer treated zero as flooded — wrong in every line, with
+/// the examples sitting in the same transcript, unchecked, contradicting it.
+const CHECK_YOURSELF: &str = "\n\nIf the problem came with worked examples, \
+trace your solution through at least one of them in your head before you \
+answer, and trust the examples over any definition you had to reconstruct from \
+a noisy transcript. Where they disagree, change the solution, not the example. \
+Say in one line which example you checked against.";
 
 /// What the CLI should be told the image is.
 fn media_type(path: &std::path::Path) -> &'static str {
@@ -677,7 +706,11 @@ impl Session {
         }
         content.push(serde_json::json!({
             "type": "text",
-            "text": if screenshot.is_some() { format!("{prompt}{OWN_PANEL}") } else { prompt },
+            "text": if screenshot.is_some() {
+                format!("{prompt}{OWN_PANEL}{CHECK_YOURSELF}")
+            } else {
+                format!("{prompt}{CHECK_YOURSELF}")
+            },
         }));
         let message = serde_json::json!({
             "type": "user",
