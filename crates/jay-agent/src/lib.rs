@@ -199,6 +199,15 @@ impl Mode {
                  Excalidraw, which imports Mermaid directly, and because ASCII \
                  boxes are unreadable at panel width. Label every edge with what \
                  flows along it. Keep it to at most eight nodes.\n\
+                 Write it for that importer, which is stricter than Mermaid's \
+                 own renderer, both verified by hand: use only plain `[ ]` \
+                 rectangles, never `[( )]` cylinders or `{ }` diamonds, because \
+                 Excalidraw silently flattens them to rectangles anyway. Keep \
+                 every node label to about three words — a long one is shrunk \
+                 to unreadable while its neighbours stay full size, so \
+                 `P[Postgres primary]` and not \
+                 `P[(Postgres primary: metadata + bytea)]`. The detail belongs \
+                 in part 3, where it can be read.\n\
                  3. Each component in one line.\n\
                  4. The two or three decisions that actually matter, one line \
                  each, saying what was traded away.\n\n\
