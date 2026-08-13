@@ -44,6 +44,29 @@ unsafe extern "C" {
         out_sample_rate: *mut f64,
     ) -> i32;
     fn jay_system_tap_stop(handle: *mut c_void);
+    fn jay_default_output_name(buffer: *mut std::os::raw::c_char, len: usize) -> i32;
+}
+
+/// Name of the output device the tap will attach itself to.
+///
+/// Read once, at start, exactly as the tap does — which is the point. The
+/// aggregate device is built around whichever output device is default at that
+/// instant and never revisits the question, so a session where the call is in
+/// headphones and this says "MacBook Pro Speakers" is a session that will hear
+/// nothing on the `them` channel and give no other sign of it.
+pub fn default_output_name() -> Option<String> {
+    let mut buffer = [0i8; 256];
+    // SAFETY: the shim writes at most `len` bytes including the terminator into
+    // the buffer we own, and reports failure rather than writing on error.
+    let ok = unsafe { jay_default_output_name(buffer.as_mut_ptr(), buffer.len()) } == 0;
+    if !ok {
+        return None;
+    }
+    // SAFETY: on success the shim has written a NUL-terminated UTF-8 string.
+    let name = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    (!name.is_empty()).then_some(name)
 }
 
 /// What the CoreAudio callback writes into. Boxed and handed to the shim as an

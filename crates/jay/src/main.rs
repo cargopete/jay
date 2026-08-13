@@ -896,6 +896,37 @@ fn run_pipeline(
     };
     drop(frame_tx);
 
+    // Say which devices this session is actually on, in the panel and in the
+    // archive, before anything else happens.
+    //
+    // Both of these are decided at start and never revisited: the microphone is
+    // opened once, and the tap builds its aggregate device around whichever
+    // output device is default at this instant. A session where the call is in
+    // your headphones and the tap is on the laptop speakers hears nothing on
+    // `them` and has no other way of telling you. Naming them costs one line
+    // and turns that into something you can read.
+    {
+        let mut on = Vec::new();
+        if source.uses_mic() {
+            on.push(format!(
+                "you: {}",
+                device.unwrap_or("the default input device")
+            ));
+        }
+        if source.uses_system() {
+            on.push(format!(
+                "them: whatever plays through {}",
+                jay_audio::system::default_output_name()
+                    .unwrap_or_else(|| "the default output device".to_string())
+            ));
+        }
+        let _ = lines.send(jay_ui::Line::notice(format!(
+            "listening on {}. Both are fixed for this session — change either \
+             one and restart jay.",
+            on.join(", ")
+        )));
+    }
+
     // Rolling context handed to every suggestion. Long enough to carry a
     // thread of conversation, short enough not to bloat the prompt. Shared,
     // because the "ask jay" button reads what the transcriber writes.

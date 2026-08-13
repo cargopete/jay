@@ -351,6 +351,50 @@ static CGImageRef JayScaleToFit(CGImageRef image) {
     return scaled ? scaled : CGImageRetain(image);
 }
 
+// Human-readable name of the current default output device, for the panel.
+//
+// The tap binds to whatever this device is at the moment jay starts and never
+// looks again, so naming it is the difference between "the other person is
+// silent" and "jay is listening to the laptop speakers while your call is in
+// your headphones". Writes at most `len` bytes including the terminator and
+// returns 0 on success.
+int jay_default_output_name(char *buffer, size_t len) {
+    if (!buffer || len == 0) {
+        return -1;
+    }
+    buffer[0] = '\0';
+
+    @autoreleasepool {
+        AudioObjectID device = kAudioObjectUnknown;
+        UInt32 size = sizeof(device);
+        AudioObjectPropertyAddress deviceAddress = {
+            .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
+            .mScope = kAudioObjectPropertyScopeGlobal,
+            .mElement = kAudioObjectPropertyElementMain,
+        };
+        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &deviceAddress, 0, NULL, &size,
+                                       &device) != noErr
+            || device == kAudioObjectUnknown) {
+            return -1;
+        }
+
+        CFStringRef name = NULL;
+        size = sizeof(name);
+        AudioObjectPropertyAddress nameAddress = {
+            .mSelector = kAudioObjectPropertyName,
+            .mScope = kAudioObjectPropertyScopeGlobal,
+            .mElement = kAudioObjectPropertyElementMain,
+        };
+        if (AudioObjectGetPropertyData(device, &nameAddress, 0, NULL, &size, &name) != noErr
+            || !name) {
+            return -1;
+        }
+
+        NSString *readable = (__bridge_transfer NSString *)name;
+        return [readable getCString:buffer maxLength:len encoding:NSUTF8StringEncoding] ? 0 : -1;
+    }
+}
+
 int jay_capture_main_display(const char *path) {
     if (!path) {
         return kJayShotWriteFailed;
