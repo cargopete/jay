@@ -130,9 +130,9 @@ impl Claude {
         content.push(serde_json::json!({
             "type": "text",
             "text": if screenshot.is_some() {
-                format!("{prompt}{OWN_PANEL}{CHECK_YOURSELF}")
+                format!("{prompt}{OWN_PANEL}{}", self_check(mode))
             } else {
-                format!("{prompt}{CHECK_YOURSELF}")
+                format!("{prompt}{}", self_check(mode))
             },
         }));
 
@@ -327,6 +327,23 @@ problem, solve the problem on the screen.";
 /// zeros are dry cells" garbled into "Once your fluids / cells, zeros and dry
 /// cells", and the answer treated zero as flooded — wrong in every line, with
 /// the examples sitting in the same transcript, unchecked, contradicting it.
+/// Which modes are worth the extra thinking [`CHECK_YOURSELF`] costs.
+///
+/// Only the ones that hand over code. Tracing an example is what catches a
+/// misread definition, and a misread definition is only fatal when it becomes
+/// an implementation — a design answer with the polarity wrong is a sentence
+/// somebody corrects out loud.
+///
+/// It is not free. Applied to every mode it took the design round from 25s to
+/// **45.6s**, past jay's own 45 second timeout, for a question that has no
+/// worked examples to trace.
+fn self_check(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Coding | Mode::Rehearsal | Mode::Pairing | Mode::Dev => CHECK_YOURSELF,
+        Mode::SystemDesign | Mode::Qa => "",
+    }
+}
+
 const CHECK_YOURSELF: &str = "\n\nIf the problem came with worked examples, \
 trace your solution through at least one of them in your head before you \
 answer, and trust the examples over any definition you had to reconstruct from \
@@ -447,6 +464,15 @@ fn build_prompt(
                 "\n\nWork it fully. If the transcript shows an attempt, say \
                  first where it went wrong or what it missed, then give the \
                  complete answer.",
+            );
+        }
+        (Mode::Qa, _) => {
+            prompt.push_str("They have already answered. The interviewer is now \
+                             asking, about that answer:\n  ");
+            prompt.push_str(question);
+            prompt.push_str(
+                "\n\nAnswer that question and only that question, in prose they \
+                 can say out loud. Not the solution again.",
             );
         }
         (Mode::Pairing, _) => {
@@ -707,9 +733,9 @@ impl Session {
         content.push(serde_json::json!({
             "type": "text",
             "text": if screenshot.is_some() {
-                format!("{prompt}{OWN_PANEL}{CHECK_YOURSELF}")
+                format!("{prompt}{OWN_PANEL}{}", self_check(self.mode))
             } else {
-                format!("{prompt}{CHECK_YOURSELF}")
+                format!("{prompt}{}", self_check(self.mode))
             },
         }));
         let message = serde_json::json!({

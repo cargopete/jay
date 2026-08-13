@@ -50,6 +50,8 @@ enum AskMode {
     Coding,
     /// Live system design interview: the missing component or tradeoff.
     SystemDesign,
+    /// Defending an answer already given: prose, no code, no diagrams.
+    Qa,
     /// Mock interview debrief: what you missed, then the full worked answer.
     Rehearsal,
     /// Live pairing: concrete, short, opinionated.
@@ -63,6 +65,7 @@ impl From<AskMode> for jay_agent::Mode {
         match mode {
             AskMode::Coding => jay_agent::Mode::Coding,
             AskMode::SystemDesign => jay_agent::Mode::SystemDesign,
+            AskMode::Qa => jay_agent::Mode::Qa,
             AskMode::Rehearsal => jay_agent::Mode::Rehearsal,
             AskMode::Pairing => jay_agent::Mode::Pairing,
             AskMode::Dev => jay_agent::Mode::Dev,
@@ -1564,12 +1567,22 @@ fn demo(state: &str) -> Result<()> {
         let cut = DEMO_ANSWER.len() * 3 / 5;
         let _ = line_tx.send(jay_ui::Line::partial(DEMO_ANSWER[..cut].to_string()));
     } else {
+        // Two answers, because the reading pane stacks them now and one
+        // answer cannot show that it does. The second is a q&a follow-up, the
+        // shape a round actually takes: solve it once, then defend it.
         let _ = line_tx.send(jay_ui::Line::suggestion(
             DEMO_ANSWER.to_string(),
             Duration::from_secs(10),
         ));
         let _ = line_tx.send(jay_ui::Line::notice(
             "10.3s · $0.196 · $0.20 this session".to_string(),
+        ));
+        let _ = line_tx.send(jay_ui::Line::suggestion(
+            DEMO_FOLLOW_UP.to_string(),
+            Duration::from_secs(8),
+        ));
+        let _ = line_tx.send(jay_ui::Line::notice(
+            "8.1s · $0.301 · $0.50 this session".to_string(),
         ));
     }
 
@@ -1587,6 +1600,16 @@ fn demo(state: &str) -> Result<()> {
 
 /// A real answer, verbatim, so the panel is checked against what it will
 /// actually be asked to draw rather than against a convenient short string.
+/// A q&a follow-up: prose, no code, no diagram. What the mode exists to give.
+const DEMO_FOLLOW_UP: &str = "O(rows x cols), and the proof is the marking \
+rule. A cell is looked at up to five times \u{2014} once by the outer sweep and once \
+by each of its four neighbours \u{2014} but it is only ever worked on once, because \
+it is marked the moment it is pushed, and every later look sees the mark and \
+stops. Five is the bound regardless of grid size, because it is the cell's \
+degree plus one and a 4-connected grid has degree four forever.\n\n\
+Watch out: say \"looked at\" and \"worked on\" as different things, or the \
+follow-up will be whether you know the difference.";
+
 const DEMO_ANSWER: &str = r#"**Approach:** a `visited` grid, or mutate the input in place: when you count a cell, zero it out so it can never be reached again.
 
 ```rust

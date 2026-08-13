@@ -15,6 +15,11 @@ use eframe::egui;
 /// the UI; the transcript itself is not the UI's job to store.
 const MAX_LINES: usize = 200;
 
+/// How many finished answers the reading pane stacks before dropping the
+/// oldest. A long round is a dozen presses; twenty is more than anyone scrolls
+/// back through and still bounded.
+const MAX_ANSWERS: usize = 20;
+
 /// What sort of line this is, which decides how it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -189,10 +194,16 @@ struct Overlay {
     last_signal: Option<Instant>,
     /// The answer currently being written, if one is.
     partial: Option<String>,
-    /// The last finished answer. Kept apart from the transcript because it is
-    /// the thing being read, and the transcript is the thing that moves.
-    answer: Option<Line>,
-    /// Set when a new answer arrives, to send the reading pane back to the top.
+    /// Every finished answer this session, oldest first.
+    ///
+    /// Kept apart from the transcript because these are the things being read,
+    /// and the transcript is the thing that moves. Stacked rather than replaced
+    /// because the follow-up questions in an interview are about the answer
+    /// before last as often as the last one, and a panel that threw the
+    /// previous answer away the moment a new one arrived made you choose
+    /// between reading and asking.
+    answers: Vec<Line>,
+    /// Set when a new answer arrives, to bring its first line into view.
     rewind: bool,
     /// Whether the window has already grown for its first answer.
     expanded: bool,
@@ -250,7 +261,7 @@ impl Overlay {
             waiting_since: None,
             last_signal: None,
             partial: None,
-            answer: None,
+            answers: Vec::new(),
             rewind: false,
             expanded: false,
             levels,
@@ -327,6 +338,15 @@ impl Overlay {
                                 Some(lag) => format!("{:.0}s", lag.as_secs_f32()),
                                 None => "writing".to_string(),
                             }));
+                            // Whole answer, prose and all. The per-block button
+                            // below is for pasting code straight into an
+                            // editor; this is for keeping the reasoning.
+                            if lag.is_some() {
+                                ui.add_space(8.0);
+                                if Self::copy_button(ui, "copy all") {
+                                    ui.ctx().copy_text(text.to_string());
+                                }
+                            }
                         },
                     );
                 });
@@ -352,17 +372,50 @@ impl Overlay {
                         .inner_margin(8.0)
                         .corner_radius(2.0)
                         .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(code)
-                                    .size(CODE)
-                                    .family(egui::FontFamily::Monospace)
-                                    .color(BRASS_HI),
+                            // The button sits above the code rather than
+                            // floating over it: an overlay would cover the
+                            // first line, which is the one being read.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Min),
+                                |ui| {
+                                    if Self::copy_button(ui, "copy") {
+                                        ui.ctx().copy_text(code.to_string());
+                                    }
+                                },
+                            );
+                            // Selectable as well as copyable, so a single
+                            // function can be lifted out of a longer block.
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(code)
+                                        .size(CODE)
+                                        .family(egui::FontFamily::Monospace)
+                                        .color(BRASS_HI),
+                                )
+                                .selectable(true),
                             );
                         });
                     ui.add_space(5.0);
                 }
             }
         }
+    }
+
+    /// A small unlit button in the same idiom as the switches.
+    fn copy_button(ui: &mut egui::Ui, label: &str) -> bool {
+        ui.add(
+            egui::Button::new(
+                egui::RichText::new(label)
+                    .size(LABEL)
+                    .family(egui::FontFamily::Monospace)
+                    .color(INK_FAINT),
+            )
+            .fill(IRON_2)
+            .stroke(egui::Stroke::new(1.0, SEAM))
+            .corner_radius(2.0),
+        )
+        .on_hover_text("to the clipboard")
+        .clicked()
     }
 
     /// The switch bank: which round the lever is answering for, and whether it
@@ -383,8 +436,11 @@ impl Overlay {
             // layout put this group in reverse — "NUDGE ANSWER GIVES" — which
             // is the sort of thing that is obvious the moment somebody looks
             // at it and invisible to anyone who cannot.
+            // "gives" read as a verb with no subject and nobody knew what it
+            // meant, including the person who uses this every day. The switch
+            // chooses how much of an answer arrives, so it says so.
             ui.add_space(10.0);
-            ui.label(stencil("gives"));
+            ui.label(stencil("detail"));
             for depth in jay_agent::Depth::ALL {
                 if Self::switch(ui, depth.label(), depth == self.depth)
                     && self.requests.send(Request::SetDepth(depth)).is_ok()
@@ -647,7 +703,10 @@ impl eframe::App for Overlay {
             if line.kind == Kind::Suggestion {
                 self.waiting_since = None;
                 self.partial = None;
-                self.answer = Some(line.clone());
+                if self.answers.len() == MAX_ANSWERS {
+                    self.answers.remove(0);
+                }
+                self.answers.push(line.clone());
                 self.rewind = true;
             }
             if line.kind == Kind::Transcript {
@@ -788,30 +847,40 @@ impl eframe::App for Overlay {
             // conversation runs along the bottom where it can chase itself.
             // With nothing to read, the reading pane is a label and no more;
             // the conversation takes the rest.
-            let has_reading = self.partial.is_some() || self.answer.is_some();
+            let has_reading = self.partial.is_some() || !self.answers.is_empty();
             let split = if has_reading {
                 (ui.available_height() * 0.66).max(140.0)
             } else {
                 46.0
             };
 
-            let mut reading = egui::ScrollArea::vertical()
+            let reading = egui::ScrollArea::vertical()
                 .id_salt("reading")
                 .max_height(split)
                 .auto_shrink([false, false]);
-            // A new answer starts at its beginning, not wherever the last one
-            // happened to leave the scrollbar.
-            if self.rewind {
-                reading = reading.vertical_scroll_offset(0.0);
-                self.rewind = false;
-            }
+            let rewind = std::mem::take(&mut self.rewind);
             reading.show(ui, |ui| {
-                match (&self.partial, &self.answer) {
-                    (Some(partial), _) => Self::draw_reading(ui, partial, None),
-                    (None, Some(answer)) => {
-                        Self::draw_reading(ui, &answer.text, Some(answer.lag))
+                let newest = self.answers.len().saturating_sub(1);
+                for (i, answer) in self.answers.iter().enumerate() {
+                    // Bring the newest answer's first line to the top of the
+                    // view, leaving the earlier ones above it to scroll back
+                    // to. Scrolling the whole pane to zero would land on the
+                    // oldest answer instead, which is the one nobody wants.
+                    if rewind && i == newest && self.partial.is_none() {
+                        ui.scroll_to_cursor(Some(egui::Align::TOP));
                     }
-                    (None, None) => {
+                    Self::draw_reading(ui, &answer.text, Some(answer.lag));
+                    ui.add_space(6.0);
+                }
+                match (&self.partial, self.answers.is_empty()) {
+                    (Some(partial), _) => {
+                        if rewind {
+                            ui.scroll_to_cursor(Some(egui::Align::TOP));
+                        }
+                        Self::draw_reading(ui, partial, None);
+                    }
+                    (None, false) => {}
+                    (None, true) => {
                         // Absent is absent. Never a zero, never a dash that
                         // could pass for a reading.
                         ui.add_space(8.0);
@@ -886,7 +955,7 @@ impl eframe::App for Overlay {
 
         // Grow once, the first time there is something to read. Sent here
         // rather than on arrival because a viewport command needs the context.
-        if !self.expanded && (self.partial.is_some() || self.answer.is_some()) {
+        if !self.expanded && (self.partial.is_some() || !self.answers.is_empty()) {
             self.expanded = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
                 egui::vec2(620.0, EXPANDED_HEIGHT),

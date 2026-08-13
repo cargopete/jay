@@ -80,6 +80,22 @@ pub enum Mode {
     /// your own attempt is the fastest way to get better, which is why every
     /// algorithms book prints them — after the exercise.
     Rehearsal,
+    /// Defending an answer you have already given.
+    ///
+    /// The half of an interview that follows the solution: "what's the time
+    /// complexity", "why two layers", "what breaks at ten times the traffic".
+    /// You are not building anything any more, you are being questioned about
+    /// something already on the screen, and the reply has to be a sentence you
+    /// can say out loud.
+    ///
+    /// It exists because [`Coding`](Mode::Coding) answers a follow-up question
+    /// with a fresh implementation and [`SystemDesign`](Mode::SystemDesign)
+    /// answers one with another capacity table and another diagram. Both are
+    /// the right shape for the question that opens a round and the wrong shape
+    /// for the twenty minutes after it. Observed, in a real loop: asked to walk
+    /// through the view path, jay returned the whole design again, diagram
+    /// included.
+    Qa,
     /// Live pairing or coaching: concrete, short, opinionated.
     Pairing,
     /// Proactive dev assistant: reacting to a red test or a stack trace.
@@ -88,9 +104,10 @@ pub enum Mode {
 
 impl Mode {
     /// Every mode, in the order a mock loop runs them.
-    pub const ALL: [Mode; 5] = [
+    pub const ALL: [Mode; 6] = [
         Mode::Coding,
         Mode::SystemDesign,
+        Mode::Qa,
         Mode::Rehearsal,
         Mode::Pairing,
         Mode::Dev,
@@ -101,6 +118,7 @@ impl Mode {
         match self {
             Mode::Coding => "code",
             Mode::SystemDesign => "design",
+            Mode::Qa => "q&a",
             Mode::Rehearsal => "debrief",
             Mode::Pairing => "pair",
             Mode::Dev => "dev",
@@ -176,10 +194,24 @@ impl Mode {
                  write ratio, storage over the retention period — because \
                  stating them first is what separates a designed system from a \
                  remembered one.\n\
-                 2. An ASCII component diagram of the data flow.\n\
+                 2. The component diagram, as a Mermaid `flowchart TD` in a \
+                 ```mermaid fenced block. Mermaid because they redraw it in \
+                 Excalidraw, which imports Mermaid directly, and because ASCII \
+                 boxes are unreadable at panel width. Label every edge with what \
+                 flows along it. Keep it to at most eight nodes.\n\
                  3. Each component in one line.\n\
                  4. The two or three decisions that actually matter, one line \
                  each, saying what was traded away.\n\n\
+                 **Size the design to the numbers you just stated, and no \
+                 further.** The commonest failure in this mode is a diagram that \
+                 would take a team a year: a floating IP, a load balancer, a \
+                 separate cache tier, a queue and three datastores, for traffic a \
+                 single box would serve. Every component must be justified by a \
+                 number in part 1 or by a stated requirement. If a simpler design \
+                 meets the numbers, draw the simpler design and name what would \
+                 force the bigger one. An interviewer asks 'why is that there' \
+                 about every box, and a box you added out of habit is the one \
+                 that sinks the round.\n\n\
                  Hard limit: under 200 words of prose in total, outside the \
                  diagram. No preamble, no closing summary. Prefer the boring \
                  mechanism teams actually ship — a unique constraint rather \
@@ -202,6 +234,28 @@ impl Mode {
                  three decisions that actually matter and what was traded away \
                  for each. Say which parts you would cut first under time \
                  pressure — knowing what is load-bearing is most of the skill."
+            }
+            Mode::Qa => {
+                "The person has already given their answer — code on screen, or \
+                 a diagram they drew — and is now being questioned about it. \
+                 Every question here is 'why', 'what happens when', or 'walk me \
+                 through'. They have to say your reply out loud, in their own \
+                 voice, within a few seconds of reading it.\n\n\
+                 So: plain prose. Short paragraphs, or at most three bullets. \
+                 **No code. No diagrams. No capacity tables. No headings.** Not \
+                 a smaller version of the original answer — an answer to the \
+                 question that was actually asked, and nothing else. If they ask \
+                 the time complexity, say the complexity and why; do not \
+                 re-derive the solution around it.\n\n\
+                 Hard limit: 120 words. Answer the question in the first \
+                 sentence, then justify it. If the answer is a number, lead with \
+                 the number.\n\n\
+                 What is on screen is what they are defending. Refer to it — \
+                 'your visited grid', 'the Varnish box' — rather than describing \
+                 something you would have built. If their answer has a real \
+                 problem the question is circling, say so in one line at the \
+                 end, prefixed 'Watch out:'. Otherwise do not volunteer \
+                 improvements; they are being examined, not redesigned."
             }
             Mode::Pairing => {
                 "You are the second engineer in a pairing session. Be concrete, \
@@ -361,12 +415,22 @@ mod tests {
                 "{mode:?} is read mid-interview and must cap its length"
             );
         }
+        // Mermaid rather than ASCII since a real round: box drawings are
+        // unreadable at panel width, and Excalidraw imports Mermaid directly,
+        // so the diagram can be redrawn rather than retyped.
         assert!(
             Mode::SystemDesign
                 .system_prompt(Depth::Full)
                 .to_lowercase()
-                .contains("ascii component diagram")
+                .contains("mermaid")
         );
+
+        // The mode that exists because the other two answer a follow-up
+        // question by giving the whole solution again.
+        let qa = Mode::Qa.system_prompt(Depth::Full).to_lowercase();
+        for forbidden in ["no code", "no diagrams", "hard limit"] {
+            assert!(qa.contains(forbidden), "q&a must say {forbidden:?}");
+        }
 
         // A hint is a nudge, and says so.
         for mode in [Mode::Coding, Mode::SystemDesign] {
