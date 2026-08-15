@@ -125,6 +125,25 @@ impl Mode {
         }
     }
 
+    /// What throwing this switch gets you, and what it takes away.
+    ///
+    /// Said out loud on every change because the switch is a trap otherwise.
+    /// A real interview was run with `q&a` selected from before the problem was
+    /// even stated: it was thrown once, early, and never thrown back, so for
+    /// forty minutes of a *system design* round jay was forbidden from drawing
+    /// a diagram or stating a capacity number. Nothing said so. The panel
+    /// printed "round: q&a" and left the rest to be inferred, and it was not.
+    pub fn gives(self) -> &'static str {
+        match self {
+            Mode::Coding => "approach, working code, complexity, edge cases",
+            Mode::SystemDesign => "numbers, a drawn diagram, components, tradeoffs",
+            Mode::Qa => "prose only — NO diagram, NO code, NO numbers section",
+            Mode::Rehearsal => "what you missed, then the full worked answer",
+            Mode::Pairing => "short, opinionated, code when it helps",
+            Mode::Dev => "the likely cause and the first thing to check",
+        }
+    }
+
     /// Appended to Claude Code's own system prompt for this mode.
     ///
     /// Kept short deliberately. Every token here is paid on every call, and

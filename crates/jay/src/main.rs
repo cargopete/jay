@@ -1009,9 +1009,12 @@ fn run_pipeline(
                     match request {
                         jay_ui::Request::SetMode(next) => {
                             mode = next;
+                            // Names what the round gives, not merely which
+                            // round it is. See `Mode::gives`.
                             let _ = lines.send(jay_ui::Line::notice(format!(
-                                "round: {}",
-                                next.label()
+                                "round: {} — {}",
+                                next.label(),
+                                next.gives()
                             )));
                             continue;
                         }
@@ -1147,7 +1150,7 @@ fn run_pipeline(
                         ?rejected,
                         "dropped a transcript"
                     );
-                    let _ = lines.send(jay_ui::Line::notice(rejected.notice(spoken)));
+                    let _ = lines.send(jay_ui::Line::notice(rejected.notice(spoken, &result.text)));
                     continue;
                 }
 

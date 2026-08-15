@@ -245,11 +245,26 @@ pub const BRIEF_UTTERANCE: Duration = Duration::from_millis(3500);
 
 /// The peak below which a brief utterance is not believed.
 ///
-/// Three times the [`SPEECH_PEAK_FLOOR`] that catches outright silence, and
-/// well under the 0.06–0.15 a voice at a laptop measures on this machine, so a
-/// quiet speaker still clears it. The inventions above peaked between 0.009 and
-/// 0.042.
-pub const QUIET_SPEECH_PEAK: f32 = 0.03;
+/// **Lowered from 0.03 after a real interview, where it was plainly wrong.**
+///
+/// The original number came from measuring a *speaker* playing into the
+/// microphone, which reads 0.06–0.15. A person actually being interviewed —
+/// sitting normally, headphones on, not leaning into the machine — reads
+/// 0.02–0.03. So the threshold had been set in the middle of the range it was
+/// supposed to be under, and ten of the candidate's utterances were dropped in
+/// forty minutes, every one of them peaking between 0.018 and 0.029.
+///
+/// The asymmetry decides the new value. A fabricated line is visible in the
+/// panel and can be ignored; a real sentence that never appears is gone, and
+/// its absence looks exactly like not having spoken. So this now sits below any
+/// plausible speaking voice and the rule catches only the genuinely faint.
+///
+/// That makes the rule weaker than it was, and knowingly so — several of the
+/// inventions it caught in testing peaked between 0.018 and 0.042 and will now
+/// get through. It is not recalibrated by guessing again: every drop now
+/// records the words it threw away, so one session says whether these were
+/// sentences or "mm-hm"s. See [`Rejected::notice`].
+pub const QUIET_SPEECH_PEAK: f32 = 0.012;
 
 /// Reject when the mean token probability falls below this.
 ///
@@ -282,25 +297,33 @@ pub enum Rejected {
 }
 
 impl Rejected {
-    /// What the panel says. Said out loud rather than logged, because a session
-    /// where everything is binned must not look like a session where nobody
-    /// spoke.
-    pub fn notice(&self, spoken: Duration) -> String {
+    /// What the panel says, including the words that were thrown away.
+    ///
+    /// Quoting the text matters more than it looks. A real interview dropped
+    /// ten of the candidate's utterances as brief-and-faint, and the archive
+    /// recorded only the durations and peaks — so afterwards there was no way
+    /// to tell whether jay had binned ten "mm-hm"s or ten sentences he had
+    /// actually said. A filter you cannot audit is a filter you cannot tune.
+    ///
+    /// The dropped text lands in the panel and the archive; it never reaches
+    /// the model's context, which is the thing being protected.
+    pub fn notice(&self, spoken: Duration, text: &str) -> String {
         match self {
-            Rejected::KnownArtefact => "dropped a known whisper artefact".to_string(),
+            Rejected::KnownArtefact => format!("dropped a known whisper artefact: {text:?}"),
             Rejected::TooQuiet { peak } => format!(
-                "heard {:.1}s at peak {peak:.4} — too quiet to trust, dropped",
+                "heard {:.1}s at peak {peak:.4} — too quiet to trust, dropped: {text:?}",
                 spoken.as_secs_f32()
             ),
             Rejected::Invented { confidence } => format!(
-                "dropped {:.1}s the transcriber did not believe (confidence {confidence:.2})",
+                "dropped {:.1}s the transcriber did not believe \
+                 (confidence {confidence:.2}): {text:?}",
                 spoken.as_secs_f32()
             ),
             Rejected::PrimingEcho => {
-                "dropped the transcriber reciting its own --vocab back".to_string()
+                format!("dropped the transcriber reciting its own --vocab back: {text:?}")
             }
             Rejected::TooBrief { spoken, peak } => format!(
-                "dropped {:.1}s at peak {peak:.3} — too brief and too faint to be speech",
+                "dropped {:.1}s at peak {peak:.3} — too brief and too faint: {text:?}",
                 spoken.as_secs_f32()
             ),
         }
@@ -458,14 +481,40 @@ mod tests {
     fn brief_and_faint_together_are_not_speech() {
         let text = spoken("ive still packed my tounou manu", 0.0, 0.83);
         assert!(matches!(
-            judge(&text, 0.011, Duration::from_millis(1600)),
+            judge(&text, 0.0115, Duration::from_millis(1600)),
             Some(Rejected::TooBrief { .. })
         ));
 
         // Short, but spoken at the machine: a real answer.
         assert_eq!(judge(&text, 0.09, Duration::from_millis(1600)), None);
         // Faint, but sustained: the interviewer across a room.
-        assert_eq!(judge(&text, 0.011, Duration::from_secs(9)), None);
+        assert_eq!(judge(&text, 0.0115, Duration::from_secs(9)), None);
+    }
+
+    /// The peaks of ten utterances a real candidate actually said, every one of
+    /// which the old 0.03 threshold threw away. None of them may be dropped.
+    #[test]
+    fn a_normal_speaking_voice_is_never_too_faint() {
+        let said = spoken("we can route that block to a dead letter queue", 0.0, 0.9);
+        for peak in [0.018, 0.020, 0.021, 0.023, 0.027, 0.028, 0.029] {
+            assert_eq!(
+                judge(&said, peak, Duration::from_millis(1500)),
+                None,
+                "dropped a real utterance peaking at {peak}"
+            );
+        }
+    }
+
+    /// And the drop still says what it threw away, so the next calibration is
+    /// evidence rather than another guess.
+    #[test]
+    fn a_drop_quotes_the_words_it_binned() {
+        let notice = Rejected::TooBrief {
+            spoken: Duration::from_millis(1500),
+            peak: 0.009,
+        }
+        .notice(Duration::from_millis(1500), "ive got this");
+        assert!(notice.contains("ive got this"), "{notice}");
     }
 
     /// A backend without confidence signals reports 0.0/1.0, which must read as
