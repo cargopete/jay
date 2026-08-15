@@ -68,7 +68,15 @@ Add whatever nouns this round turns on.
 That starts a fresh Claude process, so the next press pays the 4.7 second
 startup again — which is the price of not quitting mid-interview.
 
-**Set `GIVES` to `NUDGE`** when you want the rep rather than the answer: the
+**When the questions about your answer start**, throw `ROUND` to `Q&A`, and
+**throw it back before the next round begins**. `Q&A` gives plain prose and is
+forbidden from drawing a diagram or stating capacity numbers, which is exactly
+right for "walk me through the view path" and exactly wrong for "design me a
+pastebin". A real interview was run with it selected from before the problem was
+stated and never switched back, so the design round could not produce a design.
+The panel now says what each round gives when you throw it; read that line.
+
+**Set `DETAIL` to `NUDGE`** when you want the rep rather than the answer: the
 approach and the complexity in under forty words, no implementation.
 
 ## What good looks like
@@ -89,7 +97,7 @@ stack, and three edge cases. **9.8s.**
 > **Missing:** you jumped to storage without saying how the ID is minted, and
 > blob-plus-Postgres for a 10 KB paste is two round trips where one would do.
 
-…then 116 writes/s, 11.6k reads/s, 100 GB/day, 36 TB/year, an ASCII diagram,
+…then 116 writes/s, 11.6k reads/s, 100 GB/day, 36 TB/year, a drawn diagram,
 each component in a line, and the decisions with what each traded away — random
 7-char base62 with `INSERT … ON CONFLICT DO NOTHING` and a retry, rather than a
 coordination service. **14.9s.**

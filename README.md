@@ -175,7 +175,10 @@ send what is on screen. No gate and no button — you typed it, so you meant it.
 
 ## Modes
 
-The two interview types want different things, and one mode cannot serve both.
+An interview has phases, and no single mode serves them. Solving is not
+defending: `coding` answers a follow-up question by writing another
+implementation and `system-design` answers one with another diagram, which is
+why `q&a` exists.
 
 | Mode | For | What you get |
 | --- | --- | --- |
@@ -186,7 +189,7 @@ The two interview types want different things, and one mode cannot serve both.
 | `pairing` | Working with a colleague | Concrete, opinionated, short. Will happily give you SQL. |
 | `dev` | A test went red | What is likely responsible and the first thing worth checking. |
 
-Set **GIVES** to `NUDGE` in the panel, or add **`--hint`** to `jay ask`, to be
+Set **DETAIL** to `NUDGE` in the panel, or add **`--hint`** to `jay ask`, to be
 nudged instead of answered: the approach, the complexity, or the thing you are
 about to miss, in under forty words with no implementation. Use it when you
 want the rep rather than the answer.
