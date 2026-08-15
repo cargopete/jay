@@ -96,8 +96,9 @@ scrolled off the top by the time the code finished arriving, pushed away by
 every transcript line that landed while you read.
 
 Under the meters is a switch bank. **ROUND** picks what the lever answers for —
-`CODE`, `DESIGN`, `DEBRIEF`, `PAIR`, `DEV` — and **GIVES** picks `ANSWER` or
-`NUDGE`. Throwing either starts a fresh Claude process, so the next press pays
+`CODE`, `DESIGN`, `Q&A`, `DEBRIEF`, `PAIR`, `DEV` — and **DETAIL** picks `ANSWER`
+or `NUDGE`. Throwing ROUND announces what that round gives, because leaving it in
+the wrong position has already cost one interview its diagram. Throwing either starts a fresh Claude process, so the next press pays
 the 4.7 second startup again; that is the price of not quitting jay in the
 middle of an interview, which is what changing rounds used to cost. `--mode`
 still sets where it starts.
@@ -133,7 +134,7 @@ cargo run --release -p jay -- transcribe --seconds 20
 | | |
 | --- | --- |
 | `jay check` | Try every permission, weight and credential for real. Run before a session. |
-| `jay demo` | Draw the panel with sample content and no audio. `--state empty\|writing\|answered`. |
+| `jay demo` | Draw the panel with sample content and no audio. `--state empty\|writing\|answered\|design`. |
 | `jay transcribe` | The main event: listen, show the panel, answer when asked. |
 | `jay ask "<question>"` | One-shot, no audio. The fastest way to see what a mode gives you. |
 | `jay brief --out brief.md` | Build standing context from your memory index. |
@@ -179,7 +180,8 @@ The two interview types want different things, and one mode cannot serve both.
 | Mode | For | What you get |
 | --- | --- | --- |
 | `coding` | An algorithmic round | The approach in a sentence, complete compiling Rust with the invariant named in a comment, time and space complexity, and the edge cases a first attempt misses. |
-| `system-design` | A design round | Capacity numbers first, an ASCII component diagram, each component in a line, then the decisions that matter and what each traded away. |
+| `system-design` | A design round | Capacity numbers first, a component diagram jay draws in the panel, each component in a line, then the decisions that matter and what each traded away. The diagram is Mermaid underneath, so `copy mermaid` and Excalidraw's **Mermaid to Excalidraw** import gives you an editable drawing. |
+| `q&a` | Defending an answer already given | Plain prose under 120 words, no code, no diagram, no capacity table. For the twenty minutes of "why is that there" that follow a solution, where `coding` would write another implementation and `system-design` another diagram. |
 | `rehearsal` | The debrief afterwards | What your attempt missed, quoted back, then the full worked answer. |
 | `pairing` | Working with a colleague | Concrete, opinionated, short. Will happily give you SQL. |
 | `dev` | A test went red | What is likely responsible and the first thing worth checking. |
@@ -461,28 +463,69 @@ best wired up.
 
 ## Status
 
-Working and measured: capture on both channels, VAD, transcription, the gate,
-context selection, every mode, screen capture, session archiving, cost and
-latency. Nine test suites.
+**Parked, after one real interview.** What follows is what that session showed,
+which is more useful than any of the testing that preceded it.
 
-The button has been pressed, twice, and did the right thing both times: looked
-at an empty screen, said there was no problem to work on, and declined to
-invent one.
+### What works
 
-Rebuilt from a clean clone and put through every command that does not need a
-second person: preflight green on all five lines, `medium.en` fetched and
-decoding a jargon-heavy sentence verbatim at 11.5× real time, both channels
-capturing with zero dropped samples and 340µs worst queue lag, the system tap
-proven with real audio, all five modes answering in their documented shape, and
-the Rust from a `coding` answer compiled and passed a test written against it,
-empty list included.
+**The listening is done.** A forty-minute system-design interview with a
+principal engineer at a data company: 61 lines from the interviewer, 57 from the
+candidate, attribution correct throughout, long passages near-verbatim. Every
+part of the capture story that took a week to get right — the process tap, the
+two channels, the echo handling in both directions, Bluetooth at whatever sample
+rate the headphones feel like — held up unattended for the whole session.
 
-Still not exercised: **a real conversation**. There has been no forty-minute
-run and no session with two people in it. jay has never transcribed a live
-human voice — every word it has handled came from macOS `say` or a speaker
-played into a microphone.
+Also verified along the way: preflight on all five lines, `medium.en` decoding at
+11.5× real time, zero dropped samples with 340µs worst queue lag, session
+archiving, screen capture, six modes, diagrams drawn in the panel and importable
+straight into Excalidraw, and a clean exit. 103 tests.
 
----
+### What does not
+
+**It is too slow for a fast interviewer.** Eight to thirteen seconds an answer,
+and the interviewer in question opened with *"you probably can't use the AI as
+fast as you can think and speak"* and then set the pace deliberately. Three
+presses in twenty minutes of live round. One of those three answered the
+question before last, because the conversation had moved on in the twelve
+seconds it took to arrive.
+
+**A design round has never produced a design.** The switch was left on `q&a`
+from before the problem was stated, and `q&a` is forbidden from drawing a
+diagram. It now announces what each round gives when you throw it, which is a
+sticking plaster over a switch that is still easy to leave in the wrong place.
+
+**The brief-and-faint filter was calibrated against a loudspeaker.** A speaker
+playing into the microphone reads 0.06–0.15; a person being interviewed reads
+0.02–0.03. The threshold sat at 0.03, in the middle of the range it was meant to
+be under, and dropped ten of the candidate's utterances in forty minutes. It is
+now 0.012, which is deliberately weak, and every drop records the words it threw
+away so the next calibration can be evidence rather than a third guess.
+
+### Next, when it is picked up again
+
+1. **Read one session's drop notices.** They now quote the text. That single
+   reading says whether the filter is binning sentences or "mm-hm"s, and no
+   further guessing about thresholds should happen until it has been done.
+2. **Latency is the whole problem.** It is dominated by output length, not
+   thinking, so the lever is shorter answers or a smaller model for `q&a` —
+   where the reply is 120 words of prose and Opus is arguably not needed.
+3. **Make the round harder to get wrong.** Announcing the mode is not enough.
+   Either infer it, or stop `q&a` and `design` being mutually exclusive.
+4. **The cross-channel bleed suppressor**, designed and never built: a
+   microphone utterance overlapping a system utterance and much quieter than it
+   is the room, not the candidate. It needs two real people to calibrate and now
+   there is a recording of two real people.
+5. **A live design round.** No diagram has ever been produced in an actual
+   interview, so the whole design half remains unproven where it counts.
+
+### The lesson worth keeping
+
+Three of the filters in this repository were built by reasoning about how a
+failure ought to work, and none of them touched it. The one that worked came
+from twenty minutes of logging a repeatable session. `scripts/dictate.sh` exists
+for that reason: it reads an interviewer script aloud through the output device
+so the tap hears it as the other person, which makes a session repeatable, which
+makes it measurable. Build the harness first.
 
 ## Layout
 
@@ -496,6 +539,9 @@ crates/
 docs/
   design.md         decisions and why, including what went wrong
   mock-session.md   a runbook for an actual practice session
+scripts/
+  bundle.sh         copy the binary into the .app, for permissions
+  dictate.sh        read an interviewer script aloud, so a session repeats
 ```
 
 ## Licence
