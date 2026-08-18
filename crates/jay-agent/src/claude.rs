@@ -149,7 +149,8 @@ impl Claude {
         // codebase and that becomes a leak.
         let neutral = std::env::temp_dir();
 
-        let mut child = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        command
             .current_dir(&neutral)
             .arg("--print")
             .arg("--model")
@@ -165,7 +166,13 @@ impl Claude {
             .arg("--allowed-tools")
             .arg("")
             .arg("--append-system-prompt")
-            .arg(format!("{}{}", mode.system_prompt(self.depth), crate::LATE_ARRIVAL))
+            .arg(format!("{}{}", mode.system_prompt(self.depth), crate::LATE_ARRIVAL));
+        // See `Mode::effort`. Absent means the CLI's own default.
+        if let Some(effort) = mode.effort(self.depth) {
+            command.arg("--effort").arg(effort);
+        }
+
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -779,7 +786,8 @@ impl Session {
         // Neutral directory, for the same reason as the one-shot path: `claude
         // -p` inherits the working directory and will improvise an answer out
         // of whatever repository it is standing in.
-        let mut child = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        command
             .current_dir(std::env::temp_dir())
             .arg("--print")
             .arg("--model")
@@ -793,7 +801,13 @@ impl Session {
             .arg("--allowed-tools")
             .arg("")
             .arg("--append-system-prompt")
-            .arg(&self.system_prompt)
+            .arg(&self.system_prompt);
+        // See `Mode::effort`. Absent means the CLI's own default.
+        if let Some(effort) = self.mode.effort(self.depth) {
+            command.arg("--effort").arg(effort);
+        }
+
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

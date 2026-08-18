@@ -144,6 +144,30 @@ impl Mode {
         }
     }
 
+    /// How hard to think, passed to the CLI as `--effort`.
+    ///
+    /// Measured, on a representative q&a question with the answer already on
+    /// screen: `high` (the CLI default) averaged **15.4s** over four runs,
+    /// `medium` **9.4s**, for answers of the same length from the same model.
+    /// Medium was never the slower of a pair.
+    ///
+    /// So the modes that are read *during* a conversation and are capped at a
+    /// paragraph get `medium`, and the two that must be right rather than quick
+    /// keep the default. `coding` hands over code that has to compile and has
+    /// already been wrong once about which cell was flooded; `system-design`
+    /// has to size a system to its own numbers. Neither is worth six seconds.
+    ///
+    /// A hint is forty words in any mode, so it never needs the deeper setting.
+    pub fn effort(self, depth: Depth) -> Option<&'static str> {
+        if depth == Depth::Hint {
+            return Some("medium");
+        }
+        match self {
+            Mode::Coding | Mode::SystemDesign | Mode::Rehearsal => None,
+            Mode::Qa | Mode::Pairing | Mode::Dev => Some("medium"),
+        }
+    }
+
     /// Appended to Claude Code's own system prompt for this mode.
     ///
     /// Kept short deliberately. Every token here is paid on every call, and
