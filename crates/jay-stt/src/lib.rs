@@ -297,6 +297,43 @@ pub enum Rejected {
 }
 
 impl Rejected {
+    /// Did a person say this, or did the decoder make it up?
+    ///
+    /// The distinction decides what happens to the words. A known artefact and
+    /// a recital of the priming vocabulary are things nobody said, and putting
+    /// them in a record of a meeting is worse than leaving them out. The other
+    /// three are judgements about audio that a person quite possibly did
+    /// produce — quietly, or briefly — and those belong in the transcript,
+    /// marked, even when they are kept out of the model's context.
+    ///
+    /// This is the same asymmetry [`QUIET_SPEECH_PEAK`] is set on: a
+    /// fabrication you can see is a nuisance, and a sentence that never
+    /// appears is indistinguishable from not having spoken.
+    pub fn was_said(&self) -> bool {
+        match self {
+            Rejected::KnownArtefact | Rejected::PrimingEcho => false,
+            Rejected::TooQuiet { .. } | Rejected::Invented { .. } | Rejected::TooBrief { .. } => {
+                true
+            }
+        }
+    }
+
+    /// The reason on its own, for when the words are already on the line above.
+    pub fn reason(&self, spoken: Duration) -> String {
+        match self {
+            Rejected::KnownArtefact => "a known whisper artefact".to_string(),
+            Rejected::PrimingEcho => "the transcriber reciting its own --vocab".to_string(),
+            Rejected::TooQuiet { peak } => format!("peak {peak:.4}, too quiet to trust"),
+            Rejected::Invented { confidence } => {
+                format!("confidence {confidence:.2}, the transcriber did not believe it")
+            }
+            Rejected::TooBrief { peak, .. } => format!(
+                "{:.1}s at peak {peak:.3}, too brief and too faint",
+                spoken.as_secs_f32()
+            ),
+        }
+    }
+
     /// What the panel says, including the words that were thrown away.
     ///
     /// Quoting the text matters more than it looks. A real interview dropped

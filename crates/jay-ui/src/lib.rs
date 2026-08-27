@@ -54,7 +54,27 @@ pub struct Line {
     ///
     /// Reading a session back, "four minutes of silence here" is often the
     /// most informative thing in it.
-    pub at: std::time::Duration,
+    ///
+    /// Stamped by whoever *made* the line, from when the speech began — not
+    /// from when the transcript of it arrived. Those differ by the VAD's
+    /// silence hangover plus however long whisper took, which is seconds, and
+    /// the gap is not constant. A stamp taken on arrival is a stamp of the
+    /// decoder's mood.
+    ///
+    /// `None` means nobody stamped it and the archiver should use the time it
+    /// arrived. An `Option` rather than a zero, because zero is a real time —
+    /// the first notice of a session lands on it — and a sentinel that
+    /// collides with a legitimate value is a sentinel that eventually
+    /// rewrites one.
+    pub at: Option<std::time::Duration>,
+    /// How long the utterance lasted. Zero for anything that was not speech.
+    pub spoken: std::time::Duration,
+    /// Heard, but not trusted.
+    ///
+    /// The transcript keeps it and the model's context does not. A record of a
+    /// meeting that silently omits the quiet half of it is worse than one that
+    /// admits which lines it is unsure about.
+    pub uncertain: bool,
 }
 
 impl Line {
@@ -64,7 +84,9 @@ impl Line {
             text: text.into(),
             lag,
             kind: Kind::Transcript,
-            at: std::time::Duration::ZERO,
+            at: None,
+            spoken: std::time::Duration::ZERO,
+            uncertain: false,
         }
     }
 
@@ -74,7 +96,9 @@ impl Line {
             text: text.into(),
             lag,
             kind: Kind::Suggestion,
-            at: std::time::Duration::ZERO,
+            at: None,
+            spoken: std::time::Duration::ZERO,
+            uncertain: false,
         }
     }
 
@@ -85,7 +109,9 @@ impl Line {
             text: text.into(),
             lag: std::time::Duration::ZERO,
             kind: Kind::Partial,
-            at: std::time::Duration::ZERO,
+            at: None,
+            spoken: std::time::Duration::ZERO,
+            uncertain: false,
         }
     }
 
@@ -95,14 +121,30 @@ impl Line {
             text: text.into(),
             lag: std::time::Duration::ZERO,
             kind: Kind::Notice,
-            at: std::time::Duration::ZERO,
+            at: None,
+            spoken: std::time::Duration::ZERO,
+            uncertain: false,
         }
     }
 
     /// Stamp when this happened, relative to the start of the session.
     #[must_use]
     pub fn at(mut self, elapsed: std::time::Duration) -> Self {
-        self.at = elapsed;
+        self.at = Some(elapsed);
+        self
+    }
+
+    /// Say how long it took to say.
+    #[must_use]
+    pub fn spoken(mut self, duration: std::time::Duration) -> Self {
+        self.spoken = duration;
+        self
+    }
+
+    /// Mark it heard but not trusted.
+    #[must_use]
+    pub fn uncertain(mut self) -> Self {
+        self.uncertain = true;
         self
     }
 }
@@ -971,14 +1013,23 @@ impl eframe::App for Overlay {
                             Kind::Transcript => {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing.x = 7.0;
+                                    // Faint, and marked. An unsure line is
+                                    // still a line somebody said; drawing it
+                                    // as confidently as the rest would be the
+                                    // opposite lie to dropping it.
+                                    let (ink, name) = if line.uncertain {
+                                        (INK_FAINT, format!("{}?", line.speaker.to_uppercase()))
+                                    } else {
+                                        (INK, line.speaker.to_uppercase())
+                                    };
                                     ui.label(
-                                        egui::RichText::new(line.speaker.to_uppercase())
+                                        egui::RichText::new(name)
                                             .size(HEADING)
                                             .strong()
                                             .color(speaker_colour(&line.speaker)),
                                     );
                                     ui.label(
-                                        egui::RichText::new(&line.text).size(BODY).color(INK),
+                                        egui::RichText::new(&line.text).size(BODY).color(ink),
                                     );
                                 });
                                 ui.add_space(5.0);

@@ -19,7 +19,14 @@ use jay_stt::SpeechModel;
 #[command(name = "jay", version, about = "A consented, local-first listening assistant")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// Flags for `transcribe`, which is what jay does when told nothing else.
+    ///
+    /// Flattened here so that a bare `jay` starts listening. Transcribing a
+    /// conversation is the thing this program is for; every other subcommand
+    /// exists to check some part of it or to replay one afterwards.
+    #[command(flatten)]
+    transcribe: TranscribeArgs,
 }
 
 /// Which capture paths to run.
@@ -196,54 +203,107 @@ enum Command {
         model: Model,
     },
     /// Transcribe speech live, from the microphone and/or system audio.
-    Transcribe {
-        /// Which audio to listen to.
-        #[arg(short = 'S', long, value_enum, default_value_t = Source::Mic)]
-        source: Source,
-        /// Input device name. Defaults to the system default input.
+    ///
+    /// The default command. `jay` on its own is `jay transcribe`.
+    Transcribe(TranscribeArgs),
+    /// Write the meeting notes for a session already recorded.
+    ///
+    /// A live session does this for itself unless told not to. This is for
+    /// the ones recorded before it did, for a meeting worth writing up twice,
+    /// and for changing your mind after `--no-notes`.
+    ///
+    /// Runs on the same subscription as everything else, through the `claude`
+    /// CLI, but asks it to be a summariser rather than a coding agent.
+    Notes {
+        /// The session archive to read.
+        path: std::path::PathBuf,
+        /// Which model writes them.
+        #[arg(long, default_value = jay_agent::notes::DEFAULT_MODEL)]
+        model: String,
+        /// Where to write them. Defaults to `<session>.notes.md`.
         #[arg(short, long)]
-        device: Option<String>,
-        /// Whisper model: tiny, base, small, medium or turbo. Downloaded on first use.
-        #[arg(short, long, default_value = "medium")]
-        model: Model,
-        /// How long to run for, in seconds. Zero runs until interrupted.
-        #[arg(short, long, default_value_t = 60)]
-        seconds: u64,
-        /// Show the transcript in a floating overlay instead of the terminal.
-        #[arg(long)]
-        overlay: bool,
-        /// What kind of help to offer when you press the button.
-        #[arg(long, value_enum, default_value_t = AskMode::Pairing)]
-        mode: AskMode,
-        /// Stop suggesting after this many dollars. Unlimited by default.
-        ///
-        /// There was a $2.00 default here, on the reasoning that a runaway
-        /// agent is the expensive failure mode of this whole idea. It is not
-        /// the failure mode of *this* design: jay only ever spends when the
-        /// button is pressed, so the ceiling is your finger. A limit that can
-        /// only ever interrupt a real session mid-question is a limit worth
-        /// removing.
-        #[arg(long)]
-        budget: Option<f64>,
-        /// Standing context for the session: a job spec, a CV, an RFC.
-        ///
-        /// Read once at startup and sent with every suggestion. The single
-        /// cheapest way to stop suggestions reading generic.
-        #[arg(long)]
-        brief: Option<std::path::PathBuf>,
-        /// Where to write the session. Defaults to a timestamped file under
-        /// the sessions directory; every run is archived either way.
-        #[arg(long)]
-        save: Option<std::path::PathBuf>,
-        /// Extra words to expect, comma separated.
-        ///
-        /// Primes the transcriber. Names, product names and the jargon of this
-        /// particular round are worth adding: whisper decodes conditioned on
-        /// what it is told to expect, and the problem statement is the one
-        /// sentence spoken exactly once.
-        #[arg(long)]
-        vocab: Option<String>,
+        out: Option<std::path::PathBuf>,
     },
+}
+
+// Everything the live transcriber takes.
+//
+// Its own struct rather than an inline variant body because it is used twice:
+// as the `transcribe` subcommand, and flattened onto the top level so that a
+// bare `jay` runs it.
+//
+// Plain comments rather than doc comments, deliberately: clap takes a
+// flattened struct's doc comment as the *parent's* description, and `jay
+// --help` opened with three paragraphs about why this struct exists.
+#[derive(Debug, clap::Args)]
+struct TranscribeArgs {
+    /// Which audio to listen to.
+    ///
+    /// `both` by default. A conversation has two people in it, and a default
+    /// that records only your half is a default that produces half a record —
+    /// which you discover afterwards, when the other half is what you wanted.
+    #[arg(short = 'S', long, value_enum, default_value_t = Source::Both)]
+    source: Source,
+    /// Input device name. Defaults to the system default input.
+    #[arg(short, long)]
+    device: Option<String>,
+    /// Whisper model: tiny, base, small, medium or turbo. Downloaded on first use.
+    #[arg(short, long, default_value = "medium")]
+    model: Model,
+    /// How long to run for, in seconds. Zero runs until interrupted.
+    ///
+    /// Zero by default. Nobody knows how long a meeting is going to be, and a
+    /// transcript that stops at sixty seconds because that was the default
+    /// stops without saying so.
+    #[arg(short, long, default_value_t = 0)]
+    seconds: u64,
+    /// Show the transcript in a floating overlay instead of the terminal.
+    #[arg(long)]
+    overlay: bool,
+    /// What kind of help to offer when you press the button.
+    ///
+    /// Only reachable from the panel, so this does nothing without
+    /// `--overlay`: with no button there is nothing to press, and jay never
+    /// volunteers. A terminal run is a transcriber and nothing else.
+    #[arg(long, value_enum, default_value_t = AskMode::Pairing)]
+    mode: AskMode,
+    /// Stop suggesting after this many dollars. Unlimited by default.
+    ///
+    /// There was a $2.00 default here, on the reasoning that a runaway
+    /// agent is the expensive failure mode of this whole idea. It is not
+    /// the failure mode of *this* design: jay only ever spends when the
+    /// button is pressed, so the ceiling is your finger. A limit that can
+    /// only ever interrupt a real session mid-question is a limit worth
+    /// removing.
+    #[arg(long)]
+    budget: Option<f64>,
+    /// Standing context for the session: a job spec, a CV, an RFC.
+    ///
+    /// Read once at startup and sent with every suggestion. The single
+    /// cheapest way to stop suggestions reading generic.
+    #[arg(long)]
+    brief: Option<std::path::PathBuf>,
+    /// Where to write the session. Defaults to a timestamped file under
+    /// the sessions directory; every run is archived either way.
+    #[arg(long)]
+    save: Option<std::path::PathBuf>,
+    /// Extra words to expect, comma separated.
+    ///
+    /// Primes the transcriber. Names, product names and the jargon of this
+    /// particular round are worth adding: whisper decodes conditioned on
+    /// what it is told to expect, and the problem statement is the one
+    /// sentence spoken exactly once.
+    #[arg(long)]
+    vocab: Option<String>,
+    /// Do not write the meeting notes when the session ends.
+    ///
+    /// Notes are on by default and are the only thing a bare `jay` spends
+    /// anything on. Skipped anyway when nothing was heard.
+    #[arg(long)]
+    no_notes: bool,
+    /// Which model writes the notes.
+    #[arg(long, default_value = jay_agent::notes::DEFAULT_MODEL)]
+    notes_model: String,
 }
 
 /// Leave without running the C++ static destructors.
@@ -283,6 +343,38 @@ fn quit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
+/// Set by SIGINT. Read by the capture loop, which then stops politely.
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_interrupt(_signal: libc::c_int) {
+    // The only thing this does, and the only thing it is allowed to do: a
+    // relaxed store is async-signal-safe, and nothing else in here would be.
+    INTERRUPTED.store(true, Relaxed);
+}
+
+/// Ask for Ctrl-C to end the session rather than end the process.
+///
+/// The default disposition kills jay where it stands. The archive survives —
+/// it is flushed line by line — but whatever was mid-sentence when you pressed
+/// it does not, and neither does the footer that tells you whether anything
+/// was dropped. Since a meeting now runs until you stop it, "how you stop it"
+/// is part of the recording path rather than an afterthought.
+///
+/// A second Ctrl-C is left to the default handler, so a wedged session can
+/// still be killed the ordinary way.
+fn stop_politely_on_interrupt() {
+    // SAFETY: installing a handler that only performs a relaxed atomic store.
+    // `SA_RESETHAND` restores the default disposition after the first signal,
+    // which is what makes the second Ctrl-C work.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_interrupt as *const () as usize;
+        action.sa_flags = libc::SA_RESETHAND;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &raw const action, std::ptr::null_mut());
+    }
+}
+
 fn main() -> ! {
     let code = match run() {
         Ok(()) => 0,
@@ -305,7 +397,10 @@ fn run() -> Result<()> {
         .with_target(false)
         .init();
 
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    // A bare `jay` is `jay transcribe`, with whatever top-level flags were
+    // given. The flattened args are simply unused when a subcommand is named.
+    match cli.command.unwrap_or(Command::Transcribe(cli.transcribe)) {
         Command::Demo { state } => demo(&state),
         Command::Devices => devices(),
         Command::Listen {
@@ -314,37 +409,28 @@ fn run() -> Result<()> {
             seconds,
             out,
         } => listen(source, device.as_deref(), seconds, out.as_deref()),
-        Command::Transcribe {
-            source,
-            device,
-            model,
-            seconds,
-            overlay,
-            mode,
-            budget,
-            brief,
-            save,
-            vocab,
-        } => transcribe(
-            source,
-            device,
-            model,
-            seconds,
-            overlay,
-            Assist {
-                mode: mode.into(),
-                budget_usd: budget,
-            },
-            match brief {
+        Command::Transcribe(args) => {
+            let brief = match &args.brief {
                 Some(path) => Some(
-                    std::fs::read_to_string(&path)
+                    std::fs::read_to_string(path)
                         .with_context(|| format!("reading the brief at {}", path.display()))?,
                 ),
                 None => None,
-            },
-            save,
-            vocab,
-        ),
+            };
+            transcribe(&args, brief)
+        }
+        Command::Notes { path, model, out } => {
+            let out = out.unwrap_or_else(|| jay_agent::notes::path_for(&path));
+            let transcript = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let notes = jay_agent::notes::write(&transcript, &model)
+                .context("writing the meeting notes")?;
+            std::fs::write(&out, &notes.markdown)
+                .with_context(|| format!("writing {}", out.display()))?;
+            println!("{}\n", notes.markdown);
+            println!("{}", describe(&notes, &out));
+            Ok(())
+        }
         Command::File { path, model } => transcribe_file(&path, model),
         Command::Brief { out, from, matches } => brief(&out, from.as_deref(), &matches),
         Command::Check { out } => check(&out),
@@ -450,106 +536,63 @@ fn transcribe_file(path: &std::path::Path, model: Model) -> Result<()> {
 /// Whisper runs on its own thread. An utterance can be twenty seconds long and
 /// take a second or two to decode, and blocking the capture loop on that would
 /// back the frame channel up and start dropping audio.
-#[allow(clippy::too_many_arguments)]
-fn transcribe(
-    source: Source,
-    device: Option<String>,
-    model: Model,
-    seconds: u64,
-    overlay: bool,
-    assist: Assist,
-    brief: Option<String>,
-    save: Option<std::path::PathBuf>,
-    vocab: Option<String>,
-) -> Result<()> {
+fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
+    stop_politely_on_interrupt();
+    let source = args.source;
+    // Read once, up front, so the session can say so before it starts rather
+    // than after it has already heard everything.
+    let notes_at_the_end = !args.no_notes;
+    let assist = Assist {
+        mode: args.mode.into(),
+        budget_usd: args.budget,
+    };
+
     // Everything downstream reads one line channel, so the terminal and the
     // overlay are just two consumers of the same stream rather than two paths
     // through the pipeline.
     let (line_tx, line_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
     let (request_tx, request_rx) = crossbeam_channel::bounded::<jay_ui::Request>(2);
 
+    // One clock for the whole session, set by the capture loop the moment
+    // audio is actually flowing rather than here — loading `medium.en` takes
+    // seconds, and a transcript whose first line is stamped 00:07 because of
+    // a model load is a transcript that lies about a silence.
+    let epoch: SessionClock = std::sync::Arc::new(std::sync::OnceLock::new());
+
     // Every session is archived, without being asked to. That is the whole
     // feedback loop: the most useful input this project has had was a recording
     // of a real interview, and a loop that depends on remembering a flag is a
     // loop that does not run.
-    let path = save.unwrap_or_else(jay_agent::archive::new_session_path);
+    let path = args
+        .save
+        .clone()
+        .unwrap_or_else(jay_agent::archive::new_session_path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     println!("session → {}", path.display());
+    let archived = path.clone();
 
     // Tee the line stream to disk. Its own consumer rather than a branch in
     // each renderer, so the transcript is identical whether you ran with the
     // panel or without.
     let (line_tx, saver) = {
-        {
-            let (save_tx, save_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
-            // Moved, not cloned. A clone would leave the original sender alive
-            // in this scope — shadowed by the binding below but never dropped
-            // — so the renderer's receiver would never close and the join at
-            // the end would wait forever. Shadowing is not dropping.
-            let forward = line_tx;
-            let handle = std::thread::Builder::new()
-                .name("jay-save".into())
-                .spawn(move || {
-                    use std::io::Write;
-                    let mut file = match std::fs::File::create(&path) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::error!(%e, path = %path.display(), "could not open the transcript");
-                            return;
-                        }
-                    };
-                    let _ = writeln!(
-                        file,
-                        "# jay session\n\nTimes are minutes:seconds from the start.\n\n\
-                         Replay any moment through the real prompt path with:\n\
-                         `jay ask --mode rehearsal --context <this file> \"<the question>\"`\n"
-                    );
-
-                    // Stamped here rather than at each of the three places a
-                    // line is created: every line passes through this thread,
-                    // so one clock serves them all.
-                    let session_started = Instant::now();
-
-                    for line in save_rx {
-                        let at = if line.at.is_zero() {
-                            session_started.elapsed()
-                        } else {
-                            line.at
-                        };
-                        let clock =
-                            format!("{:02}:{:02}", at.as_secs() / 60, at.as_secs() % 60);
-                        let written = match line.kind {
-                            jay_ui::Kind::Transcript => {
-                                writeln!(file, "[{clock}] {}: {}", line.speaker, line.text)
-                            }
-                            jay_ui::Kind::Suggestion => writeln!(
-                                file,
-                                "\n[{clock}] --- jay ---\n{}\n-----------\n",
-                                line.text
-                            ),
-                            jay_ui::Kind::Notice => writeln!(file, "[{clock}] ({})", line.text),
-                            // The finished suggestion is archived; the forty
-                            // drafts of it on the way there are not.
-                            jay_ui::Kind::Partial => Ok(()),
-                        };
-                        if written.is_err() {
-                            return;
-                        }
-                        let _ = file.flush();
-                        if forward.send(line).is_err() {
-                            return;
-                        }
-                    }
-                })
-                .context("spawning the transcript writer")?;
-            (save_tx, Some(handle))
-        }
+        let (save_tx, save_rx) = crossbeam_channel::unbounded::<jay_ui::Line>();
+        // Moved, not cloned. A clone would leave the original sender alive
+        // in this scope — shadowed by the binding below but never dropped
+        // — so the renderer's receiver would never close and the join at
+        // the end would wait forever. Shadowing is not dropping.
+        let forward = line_tx;
+        let epoch = std::sync::Arc::clone(&epoch);
+        let handle = std::thread::Builder::new()
+            .name("jay-save".into())
+            .spawn(move || write_session(&path, &save_rx, &forward, &epoch, REORDER_WINDOW))
+            .context("spawning the transcript writer")?;
+        (save_tx, Some(handle))
     };
 
-    if !overlay {
+    if !args.overlay {
         let printer = std::thread::Builder::new()
             .name("jay-printer".into())
             .spawn(move || {
@@ -567,33 +610,42 @@ fn transcribe(
                         jay_ui::Kind::Partial => {}
                         jay_ui::Kind::Notice => println!("  ({})", line.text),
                         jay_ui::Kind::Transcript => println!(
-                            "[{}] {}   ({:.1}s behind)",
+                            "[{}] {}{}: {}",
+                            clock(line.at.unwrap_or_default()),
+                            if line.uncertain { "?" } else { "" },
                             line.speaker,
-                            line.text,
-                            line.lag.as_secs_f32()
+                            line.text
                         ),
                     }
                 }
             })
             .context("spawning the printer")?;
 
-        // No panel means no button, so no request channel.
+        // No panel means no button, so no request channel — and therefore no
+        // assistant thread and nothing that can spend money. A terminal run
+        // of jay is a transcriber, full stop.
         let result = run_pipeline(
             source,
-            device.as_deref(),
-            model,
-            seconds,
+            args.device.as_deref(),
+            args.model,
+            args.seconds,
             line_tx,
             assist,
             None,
             brief,
             std::sync::Arc::new(jay_audio::Levels::default()),
-            vocab,
+            args.vocab.clone(),
+            epoch,
+            notes_at_the_end,
         );
-        if let Some(handle) = saver {
-            let _ = handle.join();
-        }
+        let written = saver.and_then(|handle| handle.join().ok());
         let _ = printer.join();
+        if let Some(written) = written {
+            report(&written, &archived);
+            if !args.no_notes && written.spoken + written.unsure > 0 {
+                notes_for_session(&archived, &args.notes_model);
+            }
+        }
         return result;
     }
 
@@ -605,7 +657,13 @@ fn transcribe(
 
     // The whole pipeline moves to a background thread: on macOS the windowing
     // event loop insists on the main thread and will not negotiate.
-    std::thread::Builder::new()
+    let (device, model, seconds, vocab) = (
+        args.device.clone(),
+        args.model,
+        args.seconds,
+        args.vocab.clone(),
+    );
+    let pipeline = std::thread::Builder::new()
         .name("jay-pipeline".into())
         .spawn({
             let levels = std::sync::Arc::clone(&levels);
@@ -615,28 +673,30 @@ fn transcribe(
             // looking ready for as long as you cared to watch it.
             let complaints = line_tx.clone();
             move || {
-            if let Err(e) = run_pipeline(
-                source,
-                device.as_deref(),
-                model,
-                seconds,
-                line_tx,
-                assist,
-                Some(request_rx),
-                brief,
-                levels,
-                vocab,
-            ) {
-                tracing::error!(%e, "capture pipeline stopped");
-                let _ = complaints.send(jay_ui::Line::notice(format!(
-                    "capture stopped: {e}. Nothing more will be heard this session."
-                )));
-            }
+                if let Err(e) = run_pipeline(
+                    source,
+                    device.as_deref(),
+                    model,
+                    seconds,
+                    line_tx,
+                    assist,
+                    Some(request_rx),
+                    brief,
+                    levels,
+                    vocab,
+                    epoch,
+                    notes_at_the_end,
+                ) {
+                    tracing::error!(%e, "capture pipeline stopped");
+                    let _ = complaints.send(jay_ui::Line::notice(format!(
+                        "capture stopped: {e}. Nothing more will be heard this session."
+                    )));
+                }
             }
         })
         .context("spawning the capture pipeline")?;
 
-    jay_ui::run(
+    let closed = jay_ui::run(
         line_rx,
         request_tx,
         model.to_string(),
@@ -645,8 +705,290 @@ fn transcribe(
         levels,
         [source.uses_mic(), source.uses_system()],
     )
-        .map_err(|e| anyhow::anyhow!("overlay: {e}"))
+    .map_err(|e| anyhow::anyhow!("overlay: {e}"));
+
+    // Closing the panel ends the session; it does not end it *instantly*. The
+    // capture loop still has whatever is mid-sentence, the decoder still has a
+    // backlog, and the writer is holding the last few seconds back to put them
+    // in order. Walking away here loses all three — the process exits through
+    // `_exit`, which waits for nothing.
+    INTERRUPTED.store(true, Relaxed);
+    let _ = pipeline.join();
+    if let Some(written) = saver.and_then(|handle| handle.join().ok()) {
+        report(&written, &archived);
+        // The panel is gone by now and, under `open -a`, so is stdout. The
+        // notes still land on disk beside the session, which is where they
+        // were always going to be read from.
+        if !args.no_notes && written.spoken + written.unsure > 0 {
+            notes_for_session(&archived, &args.notes_model);
+        }
+    }
+    closed
 }
+
+/// What a set of notes cost, and where it went.
+fn describe(notes: &jay_agent::notes::Notes, out: &std::path::Path) -> String {
+    format!(
+        "notes → {}\n{} · {:.0}s · {} prompt, {} written · ${:.4}",
+        out.display(),
+        notes.model,
+        notes.spent.elapsed.as_secs_f32(),
+        notes.spent.prompt_tokens,
+        notes.spent.output_tokens,
+        notes.spent.usd
+    )
+}
+
+/// Write the notes for the session that has just ended.
+///
+/// Never fatal. The session is already on disk and is the thing that mattered;
+/// a summariser that could take the recording down with it would be a bad
+/// trade at any price. Every failure here is one printed line.
+fn notes_for_session(path: &std::path::Path, model: &str) {
+    let transcript = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) => {
+            println!("\nno notes: could not read back {} ({e})", path.display());
+            return;
+        }
+    };
+    println!("\nwriting the notes…");
+    match jay_agent::notes::write(&transcript, model) {
+        Ok(notes) => {
+            let out = jay_agent::notes::path_for(path);
+            if let Err(e) = std::fs::write(&out, &notes.markdown) {
+                println!("no notes: could not write {} ({e})", out.display());
+                return;
+            }
+            println!("\n{}\n", notes.markdown);
+            println!("{}", describe(&notes, &out));
+        }
+        // Including "nothing was said", which is not a fault and does not
+        // need a paragraph about it.
+        Err(e) => println!("no notes: {e}"),
+    }
+}
+
+/// The closing line of a session.
+fn report(written: &Written, path: &std::path::Path) {
+    if written.spoken == 0 && written.unsure == 0 {
+        println!(
+            "\nnothing was transcribed. If anybody was talking, the likeliest reasons\n\
+             are a refused permission, or a call that is not running through\n\
+             this Mac. `jay check` answers both.\n{}",
+            path.display()
+        );
+        return;
+    }
+    let unsure = match written.unsure {
+        0 => String::new(),
+        n => format!(", {n} marked unsure"),
+    };
+    println!(
+        // "of it" would be a lie on two channels: an echo, or two people
+        // talking over each other, is counted once per channel and the total
+        // can exceed the length of the meeting.
+        "\n{} line(s){unsure} over {}, {} of speech across both channels\n{}",
+        written.spoken,
+        clock(written.last),
+        clock(written.speech),
+        path.display()
+    );
+}
+
+/// The one clock every line in a session is stamped against.
+///
+/// Set once, by the capture loop, when audio starts flowing.
+type SessionClock = std::sync::Arc<std::sync::OnceLock<Instant>>;
+
+/// `mm:ss`, and `hh:mm:ss` once a meeting has gone on long enough to need it.
+fn clock(at: Duration) -> String {
+    let total = at.as_secs();
+    match total / 3600 {
+        0 => format!("{:02}:{:02}", total / 60, total % 60),
+        hours => format!("{hours}:{:02}:{:02}", (total / 60) % 60, total % 60),
+    }
+}
+
+/// How long the writer holds a line back before committing it to the file.
+///
+/// Utterances are decoded in the order they *finished*, which is not the order
+/// they began: the two channels overlap whenever people talk over each other,
+/// and a twenty-second question that started at 02:00 is decoded after a
+/// two-second "mm-hm" that started at 02:15. Written as they arrive, the
+/// transcript has the interruption backwards.
+///
+/// Measured **from when the line arrived**, not from when the speech happened.
+/// The first version of this held lines until the session clock had passed
+/// their start time by three seconds, which sounds equivalent and is not: a
+/// twenty-second question reaches the writer twenty-three seconds after it
+/// began, so it was always already due and the buffer sorted nothing at all.
+/// The tests below caught that; nothing else would have, because an archive
+/// with the interruptions backwards looks exactly like an interview where the
+/// interruptions were backwards.
+///
+/// Three seconds is not a guarantee. Guaranteeing order means holding every
+/// line for `MAX_UTTERANCE` plus decode — half a minute — which is too long to
+/// tail a meeting. Three seconds sorts everything that arrives close together,
+/// which is where inversions come from, and never introduces one that was not
+/// already there.
+const REORDER_WINDOW: Duration = Duration::from_secs(3);
+
+/// Write the session to disk, in the order things were said.
+///
+/// Forwards every line onward the instant it arrives — the panel and the
+/// terminal stay live — and commits to the file on a delay, oldest first.
+fn write_session(
+    path: &std::path::Path,
+    incoming: &crossbeam_channel::Receiver<jay_ui::Line>,
+    forward: &crossbeam_channel::Sender<jay_ui::Line>,
+    epoch: &SessionClock,
+    window: Duration,
+) -> Written {
+    use std::io::Write;
+
+    let mut written = Written::default();
+    let mut file = match std::fs::File::create(path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(%e, path = %path.display(), "could not open the transcript");
+            return written;
+        }
+    };
+    let _ = writeln!(
+        file,
+        "# jay session\n\nTimes are minutes:seconds from the first audio, taken from when \
+         each utterance *began*.\nA range is start and end; overlapping ranges are two \
+         people talking at once.\nA `?` before the speaker means jay heard it but did not \
+         trust it — kept here, kept out of the model's context.\n\n\
+         Replay any moment through the real prompt path with:\n\
+         `jay ask --mode rehearsal --context <this file> \"<the question>\"`\n"
+    );
+
+    // Only used for lines nobody stamped, and only until the capture loop sets
+    // the real one. In practice that is nothing: the first line sent is the
+    // "listening on …" notice, which the capture loop sends after starting.
+    let fallback = Instant::now();
+    let elapsed = |epoch: &SessionClock| epoch.get().unwrap_or(&fallback).elapsed();
+
+    // Held back by REORDER_WINDOW, kept sorted by when the speech began. The
+    // `Instant` is arrival, which is what the window is measured against.
+    let mut pending: Vec<(Instant, jay_ui::Line)> = Vec::new();
+    let mut forwarding = true;
+
+    let commit = |file: &mut std::fs::File, written: &mut Written, line: &jay_ui::Line| -> bool {
+        // Every line reaching here was stamped on arrival at the latest.
+        let at = line.at.unwrap_or_default();
+        match line.kind {
+            jay_ui::Kind::Transcript if line.uncertain => written.unsure += 1,
+            jay_ui::Kind::Transcript => {
+                written.spoken += 1;
+                written.speech += line.spoken;
+            }
+            _ => {}
+        }
+        written.last = written.last.max(at + line.spoken);
+        let stamp = match line.kind {
+            // A range only means something for speech. A notice happened at
+            // an instant.
+            jay_ui::Kind::Transcript if !line.spoken.is_zero() => {
+                format!("{}–{}", clock(at), clock(at + line.spoken))
+            }
+            _ => clock(at),
+        };
+        let written = match line.kind {
+            jay_ui::Kind::Transcript => writeln!(
+                file,
+                "[{stamp}] {}{}: {}",
+                if line.uncertain { "?" } else { "" },
+                line.speaker,
+                line.text
+            ),
+            jay_ui::Kind::Suggestion => writeln!(
+                file,
+                "\n[{stamp}] --- jay ---\n{}\n-----------\n",
+                line.text
+            ),
+            jay_ui::Kind::Notice => writeln!(file, "[{stamp}] ({})", line.text),
+            // The finished suggestion is archived; the forty drafts of it on
+            // the way there are not.
+            jay_ui::Kind::Partial => Ok(()),
+        };
+        if written.is_err() {
+            return false;
+        }
+        let _ = file.flush();
+        true
+    };
+
+    loop {
+        // A timeout rather than a plain `recv`, so a held-back line is still
+        // committed when the room goes quiet and nothing arrives to push it
+        // out. Otherwise the last thing said before a long silence sits in
+        // memory until the next thing is said.
+        match incoming.recv_timeout(Duration::from_millis(250)) {
+            Ok(mut line) => {
+                let at = line.at.unwrap_or_else(|| elapsed(epoch));
+                line.at = Some(at);
+                // Partials never reach the file and there can be forty of
+                // them a second; do not sort them.
+                if line.kind != jay_ui::Kind::Partial {
+                    let arrived = Instant::now();
+                    let seat = pending.partition_point(|(_, held)| held.at <= line.at);
+                    pending.insert(seat, (arrived, line.clone()));
+                }
+                // A renderer that has gone away — the panel closed — must not
+                // take the rest of the archive with it. Stop forwarding, keep
+                // writing.
+                if forwarding && forward.send(line).is_err() {
+                    forwarding = false;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Strictly from the front, so a line that is not yet due blocks
+        // everything behind it. Committing a later line around it would be
+        // the exact inversion this buffer exists to prevent.
+        while pending
+            .first()
+            .is_some_and(|(arrived, _)| arrived.elapsed() >= window)
+        {
+            let (_, line) = pending.remove(0);
+            if !commit(&mut file, &mut written, &line) {
+                return written;
+            }
+        }
+    }
+
+    // Whatever is still held back is said and done; the session is over and
+    // nothing older can arrive.
+    for (_, line) in pending {
+        if !commit(&mut file, &mut written, &line) {
+            return written;
+        }
+    }
+    written
+}
+
+/// What actually reached the file, for the line printed at the end.
+///
+/// Worth saying out loud rather than leaving to whoever opens the file. A
+/// session that recorded nothing and a session that recorded forty minutes
+/// both end with a shell prompt, and only one of them is what you wanted.
+#[derive(Debug, Default, Clone, Copy)]
+struct Written {
+    /// Transcript lines jay stands behind.
+    spoken: usize,
+    /// Transcript lines it heard but did not trust.
+    unsure: usize,
+    /// Total speech, which is a good deal less than the length of a meeting.
+    speech: Duration,
+    /// Where the last thing said sits on the session clock.
+    last: Duration,
+}
+
 
 /// Transcript lines retained for the session.
 ///
@@ -875,6 +1217,8 @@ fn run_pipeline(
     brief: Option<String>,
     levels: std::sync::Arc<jay_audio::Levels>,
     vocab: Option<String>,
+    epoch: SessionClock,
+    notes_at_the_end: bool,
 ) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
     if let Some(vocab) = &vocab {
@@ -903,6 +1247,12 @@ fn run_pipeline(
         None
     };
     drop(frame_tx);
+
+    // Zero on the session clock: the first instant anything could be heard.
+    // Set here, after the captures are open and before any line is sent, so
+    // every stamp in the archive is measured from the same moment and the
+    // several seconds spent loading `medium.en` are not counted as silence.
+    let epoch = *epoch.get_or_init(Instant::now);
 
     // Say which devices this session is actually on, in the panel and in the
     // archive, before anything else happens.
@@ -1129,6 +1479,12 @@ fn run_pipeline(
                 // Lag measured from the first sample of the utterance, which
                 // is the number a listener would actually notice.
                 let lag = utterance.started_at.elapsed();
+                // Where this sits in the session, taken from when the speech
+                // began. Not from now: "now" is the end of the sentence plus
+                // the VAD's silence hangover plus however long the decoder
+                // took, which is seconds and varies with the length of what
+                // was said.
+                let at = utterance.started_at.saturating_duration_since(epoch);
 
                 tracing::debug!(
                     spoken = spoken.as_secs_f32(),
@@ -1142,15 +1498,46 @@ fn run_pipeline(
                 // reason added later cannot be silently skipped by a branch.
                 // Said out loud rather than logged: a session where everything
                 // is dropped must not look like a session where nobody spoke.
+                // Not trusted enough to spend money reasoning about. Whether
+                // it stays in the *record* is a separate question, and the two
+                // used to be the same question, which cost a real session ten
+                // of the candidate's utterances with nothing left behind but a
+                // duration and a peak.
+                //
+                // Words nobody said are dropped outright. Words somebody
+                // probably said, quietly, go into the transcript marked — and
+                // still not into the context.
                 if let Some(rejected) = jay_stt::judge(&result, utterance.speech_peak, spoken) {
                     tracing::debug!(
                         text = %result.text,
                         peak = utterance.speech_peak,
                         confidence = result.confidence,
                         ?rejected,
-                        "dropped a transcript"
+                        "did not trust a transcript"
                     );
-                    let _ = lines.send(jay_ui::Line::notice(rejected.notice(spoken, &result.text)));
+                    let line = if rejected.was_said() {
+                        jay_ui::Line::transcript(utterance.channel.label(), result.text, lag)
+                            .at(at)
+                            .spoken(spoken)
+                            .uncertain()
+                    } else {
+                        jay_ui::Line::notice(rejected.notice(spoken, &result.text)).at(at)
+                    };
+                    if lines.send(line).is_err() {
+                        return;
+                    }
+                    if rejected.was_said() {
+                        // The reason, once, without repeating the words: they
+                        // are on the line immediately above. This is the
+                        // evidence the peak floor gets recalibrated from.
+                        let _ = lines.send(
+                            jay_ui::Line::notice(format!(
+                                "kept the line above out of context — {}",
+                                rejected.reason(spoken)
+                            ))
+                            .at(at),
+                        );
+                    }
                     continue;
                 }
 
@@ -1227,11 +1614,11 @@ fn run_pipeline(
                 // The gate runs before the line is even displayed, so a
                 // question starts its (slow) escalation as early as possible.
                 if lines
-                    .send(jay_ui::Line::transcript(
-                        utterance.channel.label(),
-                        result.text,
-                        lag,
-                    ))
+                    .send(
+                        jay_ui::Line::transcript(utterance.channel.label(), result.text, lag)
+                            .at(at)
+                            .spoken(spoken),
+                    )
                     .is_err()
                 {
                     return; // nobody is listening any more
@@ -1263,9 +1650,24 @@ fn run_pipeline(
     let mut warned_about_one_channel = false;
     const LONELY_MIC_AFTER: Duration = Duration::from_secs(45);
 
-    println!("transcribing {source:?} audio with {model}.\n");
+    println!(
+        "transcribing {source:?} audio with {model}. {}\n",
+        if unlimited {
+            "Ctrl-C when the meeting ends."
+        } else {
+            "Stopping when the clock runs out, or on Ctrl-C."
+        }
+    );
+    if notes_at_the_end {
+        // Said at the start rather than discovered at the end. It is the only
+        // thing a bare `jay` spends anything on, and a charge nobody was told
+        // about is a charge nobody agreed to.
+        println!("  (notes will be written when this ends. --no-notes to skip.)\n");
+    }
 
-    while unlimited || started.elapsed() < Duration::from_secs(seconds) {
+    while !INTERRUPTED.load(Relaxed)
+        && (unlimited || started.elapsed() < Duration::from_secs(seconds))
+    {
         // Before the receive, not after it. Below this point the loop body only
         // runs when a frame actually arrives, and "no frames at all" is
         // precisely one of the states worth complaining about — a check that
@@ -1783,6 +2185,26 @@ fn check(out: &std::path::Path) -> Result<()> {
         Err(e) => note(format!("  claude    FAIL {e}")),
     }
 
+    // The notes path, which is the same subscription as the line above but a
+    // different invocation of it: its own system prompt, no tools, and a
+    // different model. Enough differs that "claude works" does not imply
+    // "notes work", and finding that out after a meeting means finding it out
+    // with nothing to show for the meeting.
+    note("  notes     …    summarising one line".to_string());
+    // A transcript in the archive's own shape, so this exercises the real path
+    // rather than a preflight special case.
+    let probe = "# jay session\n\n[00:00–00:04] them: right, we will ship on Friday\n";
+    match jay_agent::notes::write(probe, jay_agent::notes::DEFAULT_MODEL) {
+        Ok(n) => note(format!(
+            "  notes     OK   {} in {:.1}s, {} prompt tokens, ${:.4}",
+            n.model,
+            n.spent.elapsed.as_secs_f32(),
+            n.spent.prompt_tokens,
+            n.spent.usd
+        )),
+        Err(e) => note(format!("  notes     FAIL {e}")),
+    }
+
     std::fs::write(out, &report)
         .with_context(|| format!("writing {}", out.display()))?;
     Ok(())
@@ -1985,5 +2407,208 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    fn transcript(speaker: &str, at_secs: u64, spoken_secs: u64, text: &str) -> jay_ui::Line {
+        jay_ui::Line::transcript(speaker, text, Duration::ZERO)
+            .at(Duration::from_secs(at_secs))
+            .spoken(Duration::from_secs(spoken_secs))
+    }
+
+    /// Run a whole session's worth of lines through the writer and read the
+    /// file back. The epoch is set far enough in the past that every line is
+    /// already past the reorder watermark, so this exercises ordering rather
+    /// than timing.
+    fn archive(lines: Vec<jay_ui::Line>) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "jay-writer-{}-{:?}.md",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (forward_tx, forward_rx) = crossbeam_channel::unbounded();
+        for line in lines {
+            tx.send(line).unwrap();
+        }
+        drop(tx);
+
+        let epoch: SessionClock = std::sync::Arc::new(std::sync::OnceLock::new());
+        epoch
+            .set(Instant::now() - Duration::from_secs(3600))
+            .unwrap();
+        write_session(&path, &rx, &forward_tx, &epoch, REORDER_WINDOW);
+
+        // Everything is forwarded, in arrival order, whatever the file says.
+        assert!(forward_rx.try_iter().count() > 0);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        text
+    }
+
+    fn spoken_lines(archived: &str) -> Vec<&str> {
+        archived
+            .lines()
+            .filter(|l| l.contains(": "))
+            .filter(|l| l.starts_with('['))
+            .collect()
+    }
+
+    #[test]
+    fn a_line_is_stamped_from_when_the_speech_began_and_says_how_long_it_ran() {
+        let archived = archive(vec![transcript("them", 125, 21, "count the islands")]);
+        assert!(
+            archived.contains("[02:05–02:26] them: count the islands"),
+            "{archived}"
+        );
+    }
+
+    /// The reason the writer exists. Utterances are decoded in the order they
+    /// *ended*: a long question that began at 02:00 finishes after a two-word
+    /// answer that began at 02:15, so it arrives second and, written as it
+    /// arrives, the interruption reads backwards.
+    #[test]
+    fn overlapping_speech_is_written_in_the_order_it_was_said() {
+        let archived = archive(vec![
+            transcript("you", 135, 2, "mm-hm"),
+            transcript("them", 120, 21, "so how would you shard that"),
+            transcript("you", 142, 8, "by tenant, and here is why"),
+        ]);
+        assert_eq!(
+            spoken_lines(&archived),
+            vec![
+                "[02:00–02:21] them: so how would you shard that",
+                "[02:15–02:17] you: mm-hm",
+                "[02:22–02:30] you: by tenant, and here is why",
+            ],
+            "{archived}"
+        );
+    }
+
+    /// Heard but not trusted still reaches the file, marked. Ten of a real
+    /// candidate's utterances went missing from a forty-minute interview
+    /// because "not worth spending money on" and "not worth recording" were
+    /// the same decision.
+    #[test]
+    fn a_line_jay_does_not_trust_is_kept_and_marked() {
+        let archived = archive(vec![
+            transcript("you", 10, 3, "that's the invariant").uncertain(),
+        ]);
+        assert!(
+            archived.contains("[00:10–00:13] ?you: that's the invariant"),
+            "{archived}"
+        );
+    }
+
+    /// Notices happened at an instant, not over a span.
+    #[test]
+    fn a_notice_gets_one_stamp_rather_than_a_range() {
+        let archived = archive(vec![jay_ui::Line::notice("listening on the default input")
+            .at(Duration::from_secs(0))]);
+        assert!(
+            archived.contains("[00:00] (listening on the default input)"),
+            "{archived}"
+        );
+    }
+
+    /// Drafts of an answer are not the record of a meeting.
+    #[test]
+    fn partials_never_reach_the_file() {
+        let archived = archive(vec![
+            jay_ui::Line::partial("the appro"),
+            jay_ui::Line::partial("the approach is"),
+            jay_ui::Line::suggestion("the approach is a union-find", Duration::ZERO)
+                .at(Duration::from_secs(30)),
+        ]);
+        assert!(!archived.contains("the appro\n"), "{archived}");
+        assert!(archived.contains("the approach is a union-find"), "{archived}");
+    }
+
+    /// The flush at the end of a session sorts whatever is left, so the test
+    /// above would pass even if the live path sorted nothing — which is
+    /// exactly what the first version of this did. So: run the writer with a
+    /// short window, keep the channel open, and read the file while it is
+    /// still being written.
+    #[test]
+    fn the_live_path_sorts_too_and_not_only_the_final_flush() {
+        const WINDOW: Duration = Duration::from_millis(100);
+        let path = std::env::temp_dir().join(format!("jay-writer-live-{}.md", std::process::id()));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (forward_tx, _forward_rx) = crossbeam_channel::unbounded();
+        let epoch: SessionClock = std::sync::Arc::new(std::sync::OnceLock::new());
+        epoch.set(Instant::now()).unwrap();
+
+        let writer = std::thread::spawn({
+            let path = path.clone();
+            move || write_session(&path, &rx, &forward_tx, &epoch, WINDOW)
+        });
+
+        // Both arrive well inside the window, out of order, as they would from
+        // a decoder working through two overlapping utterances.
+        tx.send(transcript("you", 135, 2, "mm-hm")).unwrap();
+        tx.send(transcript("them", 120, 21, "so how would you shard that"))
+            .unwrap();
+
+        // Long enough for them to fall due and be written, and far short of
+        // the end of the session.
+        std::thread::sleep(WINDOW * 6);
+        let midway = std::fs::read_to_string(&path).unwrap();
+
+        drop(tx);
+        let written = writer.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            spoken_lines(&midway),
+            vec![
+                "[02:00–02:21] them: so how would you shard that",
+                "[02:15–02:17] you: mm-hm",
+            ],
+            "{midway}"
+        );
+        assert_eq!(written.spoken, 2);
+    }
+
+    #[test]
+    fn the_clock_grows_an_hour_field_only_when_a_meeting_needs_one() {
+        assert_eq!(clock(Duration::from_secs(0)), "00:00");
+        assert_eq!(clock(Duration::from_secs(65)), "01:05");
+        assert_eq!(clock(Duration::from_secs(59 * 60 + 59)), "59:59");
+        assert_eq!(clock(Duration::from_secs(3600)), "1:00:00");
+        assert_eq!(clock(Duration::from_secs(3600 + 125)), "1:02:05");
+    }
+
+    /// A bare `jay` is a meeting transcriber: both sides, no time limit, and
+    /// nothing that can spend money because there is no panel to press.
+    #[test]
+    fn the_default_command_records_both_sides_until_stopped() {
+        let cli = Cli::parse_from(["jay"]);
+        assert!(cli.command.is_none());
+        assert!(matches!(cli.transcribe.source, Source::Both));
+        assert_eq!(cli.transcribe.seconds, 0);
+        assert!(!cli.transcribe.overlay);
+    }
+
+    #[test]
+    fn top_level_flags_reach_the_default_command() {
+        let cli = Cli::parse_from(["jay", "--source", "mic", "--seconds", "30"]);
+        assert!(matches!(cli.transcribe.source, Source::Mic));
+        assert_eq!(cli.transcribe.seconds, 30);
+    }
+
+    #[test]
+    fn naming_the_subcommand_still_works() {
+        let cli = Cli::parse_from(["jay", "transcribe", "--overlay", "--source", "system"]);
+        let Some(Command::Transcribe(args)) = cli.command else {
+            panic!("expected the transcribe subcommand");
+        };
+        assert!(args.overlay);
+        assert!(matches!(args.source, Source::System));
+    }
+
+    #[test]
+    fn the_cli_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }

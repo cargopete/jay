@@ -1,6 +1,8 @@
 # jay
 
-A local-first listening assistant for practising technical interviews.
+A local-first meeting transcriber for macOS. It records both halves of a call,
+writes a timestamped transcript, and turns it into notes when the meeting ends.
+The audio never leaves your machine.
 
 Named for the bird that sits quietly in the canopy watching, and calls the
 moment something is worth calling about. That is roughly the job description.
@@ -9,16 +11,25 @@ moment something is worth calling about. That is roughly the job description.
 
 ## What it is
 
-You are practising for interviews with someone playing interviewer — over a
-call, doing the real thing properly. jay listens to both of you, keeps the
-transcript locally, and when you press a button gives you the answer: working
-code for an algorithmic question, an architecture diagram for a design question,
-or a short nudge if you would rather work it out yourself.
+**A transcriber.** `jay` on its own records your microphone and whatever is
+playing through your speakers as two separate channels, so it knows which of
+you said what without guessing at voices. Every line is stamped from when the
+speech began. When you stop it, it writes the notes: what was decided, who owes
+what, what nobody answered, each line citing the moment it came from.
 
-Afterwards it runs the debrief. It quotes your attempt back, says what you
-missed, then gives the answer you should have given.
+Whisper runs locally. The notes are one call to Claude at the end — the only
+thing that leaves the machine, and only ever the text.
 
-Everything except the model call runs on your machine. Audio never leaves it.
+**And a panel, if you ask for one.** `jay --overlay` puts a small floating
+window above everything with a button on it. That half was built for practising
+technical interviews with a partner playing interviewer: press the button and
+you get working code for an algorithmic question, a diagram for a design
+question, or a short nudge if you would rather work it out yourself. Afterwards
+it runs the debrief — quotes your attempt back, says what you missed, then
+gives the answer you should have given.
+
+The transcriber came out of building that and turned out to be the more
+generally useful half.
 
 ### What it is not
 
@@ -56,7 +67,7 @@ open -n -a ~/Projects/jay/target/release/jay.app --args check --out /tmp/jay-che
 cat /tmp/jay-check.txt
 ```
 
-You want five OKs:
+You want six OKs:
 
 ```
   mic       OK   46 frames, peak 0.0028 RMS
@@ -64,6 +75,7 @@ You want five OKs:
   screen    OK   captured 676 KB
   whisper   OK   …/ggml-medium.en.bin
   claude    OK   4.4s, $0.0036 — cache is now warm
+  notes     OK   claude-sonnet-5 in 7.0s, 14670 prompt tokens, $0.0124
 ```
 
 The microphone line is a real three-second recording, not a device listing.
@@ -78,11 +90,25 @@ Recording**. Tick it and run the check again. The first run also downloads the
 whisper weights (1.5 GB) and warms the prompt cache, both worth doing before a
 session rather than during one.
 
-Then run it:
+Then run it. To transcribe a meeting and nothing else, in a terminal:
+
+```sh
+jay
+```
+
+Both sides, no time limit, no panel. Ctrl-C when the meeting ends. The
+transcript is written as it goes, so it survives whatever happens to the
+process afterwards, and when it ends jay writes the meeting notes beside it —
+what was decided, who owes what, what nobody answered — each line citing the
+timestamp it came from. That last part is the only thing a bare `jay` spends
+anything on, and `--no-notes` turns it off. The session says which it is doing
+before it starts listening.
+
+For the interview panel, which is the same transcriber with a button on it:
 
 ```sh
 open -n -a ~/Projects/jay/target/release/jay.app --args \
-  transcribe --overlay --source both --mode coding --seconds 0
+  --overlay --mode coding
 ```
 
 A small dark panel appears above everything, draggable by its header. Talk.
@@ -135,8 +161,10 @@ cargo run --release -p jay -- transcribe --seconds 20
 | --- | --- |
 | `jay check` | Try every permission, weight and credential for real. Run before a session. |
 | `jay demo` | Draw the panel with sample content and no audio. `--state empty\|writing\|answered\|design`. |
-| `jay transcribe` | The main event: listen, show the panel, answer when asked. |
+| `jay` | The default. Listen to both sides and write the transcript. Nothing else. |
+| `jay --overlay` | The same, with the panel and the button that answers when asked. |
 | `jay ask "<question>"` | One-shot, no audio. The fastest way to see what a mode gives you. |
+| `jay notes <session.md>` | Write the meeting notes for a session already recorded. |
 | `jay brief --out brief.md` | Build standing context from your memory index. |
 | `jay file talk.wav` | Transcribe a 16 kHz mono WAV — a recorded session, a talk. |
 | `jay listen` | Capture smoke test: frame counts, levels, dropped samples. |
@@ -144,22 +172,72 @@ cargo run --release -p jay -- transcribe --seconds 20
 
 ### `transcribe`
 
+The default command, so `jay` and `jay transcribe` are the same thing. Both
+sides, no time limit, terminal output.
+
 ```sh
-jay transcribe --overlay --source both --mode coding \
-  --brief brief.md --budget 2.00 --seconds 0
+jay --overlay --mode coding --brief brief.md --vocab "union-find, Patroni"
 ```
 
 | Flag | |
 | --- | --- |
-| `--source` | `mic`, `system`, or `both`. `both` lets jay tell you apart. |
-| `--overlay` | Floating panel instead of terminal output. |
-| `--mode` | Which round to start in. Switchable in the panel afterwards. |
+| `--source` | `mic`, `system`, or `both`. Default `both`; it is what lets jay tell you apart. |
+| `--seconds` | Default `0`: runs until Ctrl-C, or until you close the panel. |
+| `--overlay` | Floating panel instead of terminal output. Without it there is no button, so nothing can be spent. |
+| `--mode` | Which round to start in. Switchable in the panel afterwards. Does nothing without `--overlay`. |
 | `--brief` | Standing context for the session. |
 | `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
-| `--seconds` | `0` runs until you close the panel. |
 | `--model` | `tiny`, `base`, `small`, `medium`, `turbo`. Default `medium`. |
 | `--vocab` | Extra words to expect, comma separated. Primes the transcriber. |
+| `--no-notes` | Do not write the meeting notes when the session ends. |
+| `--notes-model` | Which model writes them. Default `claude-sonnet-5`. |
+
+### `notes`
+
+```sh
+jay notes ~/Library/Application\ Support/jay/sessions/<session>.md
+```
+
+Turns a transcript into the page you actually keep: what was decided, who owes
+what, what nobody answered, and the thread of the conversation. Written beside
+the session as `<session>.notes.md`. A live session does this for itself when
+it ends, so this command is for meetings recorded before it did, and for
+changing your mind after `--no-notes`.
+
+Two things about it are not merely a summariser pointed at a log.
+
+**Every line cites the moment it came from.** A decision reads
+`Sharding by tenant, not by hash — the hot-tenant case is rare and the
+rebalance cost is not [12:04]`, and you can go back and listen to 12:04. That
+only works because the timestamps are honest, which they were not until
+recently.
+
+**Who owes what is not a guess.** `you` and `them` are two separate
+microphones, so an action assigned to you was said by you. Everything a
+diarizer would have to infer from voices, jay knows from wiring. What it
+cannot do is tell six people on the far side apart; they are all `them`, and
+the notes say `them` rather than picking a name.
+
+It is also told, at some length, that an unresolved discussion is an open
+question rather than a decision, that an empty section is a true section, and
+that a point resting on a `?` line has to say so. The failure mode of a meeting
+summary is not that it reads badly; it is that it asserts a decision nobody
+made.
+
+| Flag | |
+| --- | --- |
+| `--model` | Default `claude-sonnet-5`. |
+| `--out` | Where to write them. Defaults to `<session>.notes.md`. |
+
+Same subscription as everything else, through the `claude` CLI. Unlike
+everything else, it asks the CLI to stop being Claude Code first — see
+[shedding the agent](#shedding-the-agent), which is worth reading whether or
+not you care about notes.
+
+Nothing here is fatal. A session that cannot write its notes prints one line
+and leaves the transcript alone; the recording is the thing that mattered and a
+summariser must not be able to take it down.
 
 ### `ask`
 
@@ -253,6 +331,34 @@ are about ten seconds between a sound arriving and a sentence appearing, and
 until there was a meter, a dead microphone and a quiet room looked identical
 for all ten of them.
 
+### Shedding the agent
+
+`claude --print` is Claude Code with the interactive part removed, and it
+brings Claude Code's system prompt and its whole tool catalogue with it. For
+the notes, which involve no tools and no repository, that is a large amount of
+instruction about being a coding agent sitting in front of a request to
+summarise a meeting.
+
+Measured on this machine, one `claude --print` call carrying a one-word
+question:
+
+| | prompt tokens |
+| --- | --- |
+| Default system prompt, `--allowed-tools ""` | 42,535 |
+| Own system prompt (`--system-prompt`), `--allowed-tools ""` | 33,911 |
+| Own system prompt, tools named in `--disallowed-tools` | 13,609 |
+
+Two thirds of it, gone. The surprise is the second row: **`--allowed-tools ""`
+does not remove the tool definitions**, it only stops them being called. They
+stay in the prompt, and they are about twenty thousand tokens. Naming the tools
+in `--disallowed-tools` is what removes them.
+
+`notes` does both. **The panel's suggestions still do neither**, and that is
+the obvious next thing to try — the tokens are imputed on a subscription, but
+19,000 of them are instructions about a filesystem the model is not allowed to
+touch, and shorter prompts are the one lever that has reliably moved latency in
+this project.
+
 **The answer.** Recent conversation, the pinned problem, your brief and a
 screenshot of the display, through `claude -p` on your subscription.
 
@@ -289,8 +395,45 @@ Every run archives itself to a timestamped file under
 feedback loop that depends on remembering a flag is a loop that does not run.
 
 The file holds the conversation, everything jay said, a clock stamp on each
-line, and what each suggestion cost. It is written to be *replayed*, not merely
-read:
+line, and what each suggestion cost.
+
+```
+[00:00] (listening on you: MacBook Pro Microphone, them: whatever plays through AirPods Pro.)
+[00:21–00:33] them: The problem is a rate limiter, distributed across many nodes.
+[00:34–00:36] you: Right.
+[00:35–00:52] them: And I want the counters consistent without a round trip per request.
+[01:04–01:06] ?you: token bucket, per tenant
+[01:04] (kept the line above out of context — 2.1s at peak 0.009, too brief and too faint)
+```
+
+Three things to know about reading it back.
+
+**A stamp is when the speech began, not when the transcript of it appeared.**
+Those differ by the VAD's silence hangover plus however long the decoder took,
+which is seconds and varies with the length of what was said. jay stamped
+arrival times until August 2026, which made every session read two to four
+seconds late.
+
+**Ranges overlap when people talk over each other**, as `00:34–00:36` and
+`00:35–00:52` do above. Utterances are *decoded* in the order they finished, so
+a long question is decoded after a short interjection that began later; the
+writer holds each line back three seconds and commits them in the order they
+were said. Three seconds is not a guarantee — guaranteeing it means holding
+every line for half a minute, which is too long to watch a meeting go by — but
+it sorts everything that arrives close together, which is where the inversions
+come from.
+
+**A `?` means jay heard it and did not trust it.** Those lines stay in the
+record and stay out of the model's context, and the reason is written on the
+line beneath so the thresholds can be recalibrated from evidence. A record of a
+meeting that silently omits the quiet half of it is worse than one that admits
+what it is unsure about — a real interview lost ten of the candidate's
+utterances that way, leaving nothing behind but a duration and a peak.
+
+Words nobody said are still dropped outright: known whisper artefacts, and the
+decoder reciting its own `--vocab` back. Those get a notice rather than a line.
+
+It is written to be *replayed*, not merely read:
 
 ```sh
 jay ask --mode rehearsal --brief brief.md \
@@ -301,11 +444,16 @@ jay ask --mode rehearsal --brief brief.md \
 That is the only honest way to tell whether a change to the prompts helped,
 rather than whether it reads better.
 
+And when the session ends, jay writes `<session>.notes.md` beside it. See
+[`notes`](#notes).
+
 ---
 
 ## Costs
 
-Measured on an M3 Pro, driving a Max subscription.
+Measured on an M3 Pro, driving a Max subscription. Dollar figures are the CLI's
+own `total_cost_usd`, which is an imputed list price rather than money leaving
+an account.
 
 | | |
 | --- | --- |
@@ -314,6 +462,7 @@ Measured on an M3 Pro, driving a Max subscription.
 | A coding answer with working Rust | ~9s, ~$0.19, first words at ~5s |
 | A design answer | ~16s, ~$0.20 |
 | A rehearsal debrief | ~53s, ~$0.28 — uncapped by design, run after the round |
+| Meeting notes, one-minute meeting | 11s, ~$0.027 imputed, 16,440 prompt tokens — of which the meeting is about 1,400 |
 | Idle, listening | ~0.2% of one core, 1.87 GB resident |
 
 A hint is roughly twice as fast as a coding answer and three times as fast as a
@@ -466,8 +615,17 @@ best wired up.
 
 ## Status
 
-**Parked, after one real interview.** What follows is what that session showed,
-which is more useful than any of the testing that preceded it.
+**Parked after one real interview, then picked back up for the transcription
+half.** What follows is what that session showed, which is more useful than any
+of the testing that preceded it.
+
+Since then, transcribing a conversation has become the thing jay does by
+default rather than the thing it does on the way to answering: `jay` on its own
+records both sides until you stop it, and the assistant is only reachable from
+a panel you have to ask for. Stamps are taken from when speech began rather
+than when the decoder finished with it, overlapping utterances are written in
+the order they were said, and a line jay does not trust stays in the record
+marked rather than vanishing from it.
 
 ### What works
 
@@ -481,7 +639,27 @@ rate the headphones feel like — held up unattended for the whole session.
 Also verified along the way: preflight on all five lines, `medium.en` decoding at
 11.5× real time, zero dropped samples with 340µs worst queue lag, session
 archiving, screen capture, six modes, diagrams drawn in the panel and importable
-straight into Excalidraw, and a clean exit. 103 tests.
+straight into Excalidraw, and a clean exit. 114 tests.
+
+**The notes work, on two transcripts.** One dictated interview opening and one
+hand-written two-sided conversation built to trip them up. Both held: an
+explicitly deprioritised item ("let's not do that this week") was recorded in
+the thread and *not* turned into an action, an empty section came out `- none`
+rather than invented, the two speakers' actions were not swapped, and a point
+resting on a `?` line was carried across with the caveat rather than asserted —
+including quoting the transcriber's mangled "Petrino" for Patroni rather than
+silently correcting it into a claim.
+
+A third, end to end: dictated through the speakers, transcribed live off the
+system tap, and summarised when Ctrl-C ended the session. The interesting part
+was the failure it did not make. The speakers bled into the microphone, so two
+sentences appear in the archive twice — once as `them`, once as `you` — with a
+notice underneath saying which copy was the room. Handed that, the notes
+correctly reported one speaker and said so in a footnote, rather than inventing
+a second person who agreed with the first.
+
+Two synthetic transcripts and one one-minute session is not a forty-minute
+meeting, and nobody has run one.
 
 ### What does not
 
@@ -506,9 +684,11 @@ away so the next calibration can be evidence rather than a third guess.
 
 ### Next, when it is picked up again
 
-1. **Read one session's drop notices.** They now quote the text. That single
-   reading says whether the filter is binning sentences or "mm-hm"s, and no
-   further guessing about thresholds should happen until it has been done.
+1. **Read one session's `?` lines.** The filter no longer removes them from the
+   record, only from the model's context, and the reason sits on the line
+   beneath each one. That single reading says whether it is holding back
+   sentences or "mm-hm"s, and no further guessing about thresholds should
+   happen until it has been done.
 2. **Latency is the whole problem.** It is dominated by output length, not
    thinking, so the lever is shorter answers or a smaller model for `q&a` —
    where the reply is 120 words of prose and Opus is arguably not needed.
@@ -549,4 +729,13 @@ scripts/
 
 ## Licence
 
-MIT or Apache-2.0, at your option.
+MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
+
+## A word about recording people
+
+jay records both halves of a conversation. Whether you may do that where you
+are is a question with a legal answer that varies by jurisdiction and a social
+answer that does not: tell people. The software does nothing to help you record
+somebody who has not agreed to it, and the section above on why it refuses to
+hide itself is there for the same reason.

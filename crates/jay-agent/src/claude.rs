@@ -1,7 +1,7 @@
 //! Talking to Claude through the local CLI.
 //!
 //! jay drives the `claude` binary in headless mode rather than the HTTP API,
-//! because that is what uses Chief's Max subscription: the CLI already holds
+//! because that is what uses the signed-in Claude subscription: the CLI holds
 //! the OAuth session, so there is no API key to manage and no second bill.
 //!
 //! The cost of this convenience is measured, not assumed. Each invocation

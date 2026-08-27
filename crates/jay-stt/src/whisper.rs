@@ -27,7 +27,7 @@ pub struct Whisper {
 /// The vocabulary every session gets, before anything problem-specific.
 ///
 /// Two registers, because both appear in the same sentence: the language of
-/// algorithmic interviews, and the language Chief actually works in. Terms are
+/// algorithmic interviews, and the language of the work itself. Terms are
 /// chosen for being both likely and easy to mishear — "idempotent" and
 /// "jemalloc" are the sort of word a general model has no reason to reach for.
 const DEFAULT_VOCABULARY: &str = "This is a technical interview about \

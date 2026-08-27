@@ -19,6 +19,7 @@ pub mod claude;
 pub mod context;
 pub mod echo;
 pub mod gate;
+pub mod notes;
 pub mod screen;
 
 /// How much of an answer to give.
