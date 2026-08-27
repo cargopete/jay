@@ -3,10 +3,10 @@
 Two rounds, back to back, with a partner playing interviewer over a call.
 Everything here has been run against the real prompt path.
 
-## Before she joins
+## Before they join
 
 **Headphones on.** Not optional, and it is the single most important line in
-this document. Her voice leaving your speakers and returning through your
+this document. Their voice leaving your speakers and returning through your
 microphone is captured on both channels, and it fails in two ways.
 
 When the microphone copy transcribes cleanly, every question lands twice with

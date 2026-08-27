@@ -664,8 +664,8 @@ meeting, and nobody has run one.
 ### What does not
 
 **It is too slow for a fast interviewer.** Eight to thirteen seconds an answer,
-and the interviewer in question opened with *"you probably can't use the AI as
-fast as you can think and speak"* and then set the pace deliberately. Three
+against an interviewer who opened by observing that nobody can work a model as
+fast as they can think and talk, and then set the pace to prove it. Three
 presses in twenty minutes of live round. One of those three answered the
 question before last, because the conversation had moved on in the twelve
 seconds it took to arrive.

@@ -95,17 +95,22 @@ A recording of two real interviews, in which a commercial tool of this kind
 helped badly, drove three changes. It is worth writing down what it got wrong,
 because the failures are not obvious from the outside.
 
-**It answered the scheduling.** Three minutes of "do you see the updated
-invitation?", "would you like to start earlier?", "I assume we have another
-interview setup still for today, right?" — every one a grammatical question,
-not one of them wanting help. Detecting a question is easy; detecting a
-question worth twelve seconds and twenty cents is the actual problem. Hence
-the small-talk filter in `jay-agent::gate`, whose test corpus is those exact
-lines, verbatim.
+**It answered the scheduling.** Three minutes of diary-shuffling at the top of
+the call — whether the other person could see the invitation, whether the start
+could move earlier, whether there was another one of these booked in
+afterwards. Every one a grammatical question, not one of them wanting help.
+Detecting a question is easy; detecting a question worth twelve seconds and
+twenty cents is the actual problem. Hence the small-talk filter in
+`jay-agent::gate`.
+
+Its test corpus is rewritten from those lines rather than quoted from them —
+the other person did not agree to be published — but each rewrite still trips
+the marker its original produced, so the filter is exercised on the thing it
+was calibrated against.
 
 **Its help arrived after the moment had passed.** In the second interview the
-candidate reasoned his own way to JWT-plus-ownership between 02:52 and 02:53;
-the polished answer landed at 02:53, after he had got there. That matches the
+candidate reasoned their own way to JWT-plus-ownership between 02:52 and 02:53;
+the polished answer landed at 02:53, after they had got there. That matches the
 measured 12–20s and it is not fixable by being cleverer. So every mode's prompt
 now carries [`LATE_ARRIVAL`]: read what has already been said, do not repeat it,
 give only what is missing. Arriving late is only a problem if you were trying

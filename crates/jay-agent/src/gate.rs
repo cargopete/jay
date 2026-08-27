@@ -11,13 +11,14 @@
 //!
 //! # What a real transcript taught this module
 //!
-//! The test corpus at the bottom is taken verbatim from a recorded interview
-//! where a commercial tool of this kind performed badly. It failed in one
-//! specific way, over and over: it treated every question as a question worth
-//! answering, and so kept producing help through three solid minutes of
-//! scheduling ("do you see the updated invitation?", "would you like to start
-//! earlier?"). Detecting a question is easy. Detecting a question *worth
-//! spending twelve seconds and twenty cents on* is the actual problem.
+//! The test corpus at the bottom is rewritten from a recorded interview where a
+//! commercial tool of this kind performed badly. It failed in one specific way,
+//! over and over: it treated every question as a question worth answering, and
+//! so kept producing help through three solid minutes of diary-shuffling —
+//! whether the invitation had come through, whether the start could move
+//! earlier, whether there was another of these booked afterwards. Detecting a
+//! question is easy. Detecting a question *worth spending twelve seconds and
+//! twenty cents on* is the actual problem.
 
 /// Why jay decided to speak.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +53,8 @@ const WAKE_PHRASES: &[&str] = &["hey jay", "ok jay", "okay jay", "jay,"];
 
 /// Markers of a question about logistics, scheduling or the call itself.
 ///
-/// Every one of these is drawn from a real transcript in which a tool of this
-/// kind kept offering technical help through the goodbyes. A question
+/// Every one of these was derived from a real transcript in which a tool of
+/// this kind kept offering technical help through the goodbyes. A question
 /// containing any of them is social or administrative, and answering it is
 /// worse than saying nothing: it costs money and it puts text in front of
 /// someone who is trying to agree a meeting time.
@@ -245,24 +246,36 @@ mod tests {
         assert_eq!(classify("   "), None);
     }
 
-    /// Verbatim from a real interview recording, in which a commercial tool of
-    /// this kind kept offering technical help throughout. Every line here is a
-    /// grammatical question and not one of them wants an answer from jay.
+    /// The three minutes of diary-shuffling that open a scheduled call, in
+    /// which a commercial tool of this kind offered technical help throughout.
+    ///
+    /// Rewritten from a real recording rather than quoted from it, since the
+    /// other person did not agree to be published. Two things were kept, and
+    /// they are the two the filter is actually judged on.
+    ///
+    /// The **shape**: a yes/no about a shared artefact, a long hedged one full
+    /// of disfluency, an elliptical one, one whose grammar has collapsed
+    /// mid-sentence, and a tag question.
+    ///
+    /// The **markers**: every line still trips a different entry in
+    /// [`SMALL_TALK`], because those entries were derived from the original
+    /// sentences and a rewrite that quietly stopped exercising them would be a
+    /// test that passes for the wrong reason.
     #[test]
     fn declines_the_scheduling_chat_that_sank_the_competition() {
         for line in [
-            "Do you see the updated invitation?",
-            "would you like, are you, like, committed to this particular hour \
-             or would you like to start, for example, earlier?",
-            "So we have one hour break?",
-            "if you can move it one your time, that would be, uh, two?",
-            "I assume we have another interview setup still for today, right?",
+            "Can you see the calendar link I just sent?",
+            "would you, are you, like, fixed on this particular slot \
+             or could we maybe push it back a bit?",
+            "So there is one hour between the two rounds?",
+            "if you would rather reschedule, that would be, uh, three o'clock?",
+            "I assume we are doing another interview after the break, right?",
         ] {
             assert_eq!(classify(line), None, "should have declined: {line}");
         }
     }
 
-    /// From the same recording: the questions that genuinely wanted help.
+    /// The other half of the same call: questions that genuinely wanted help.
     #[test]
     fn still_escalates_the_technical_questions_from_the_same_call() {
         for line in [
