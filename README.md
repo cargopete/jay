@@ -719,17 +719,17 @@ best wired up.
 
 ## Status
 
-**Parked after one real interview, then picked back up for the transcription
-half.** What follows is what that session showed, which is more useful than any
-of the testing that preceded it.
+**Used in anger twice: one 40-minute interview, one 75-minute meeting.** What
+follows is what those two sessions showed, which is worth more than everything
+that preceded them put together.
 
-Since then, transcribing a conversation has become the thing jay does by
-default rather than the thing it does on the way to answering: `jay` on its own
-records both sides until you stop it, and the assistant is only reachable from
-a panel you have to ask for. Stamps are taken from when speech began rather
-than when the decoder finished with it, overlapping utterances are written in
-the order they were said, and a line jay does not trust stays in the record
-marked rather than vanishing from it.
+Transcribing a conversation is now the thing jay does by default rather than
+the thing it does on the way to answering. `jay` on its own opens the panel and
+records both sides until you stop it; the assistant is a button you have to
+press. Stamps are taken from when speech began rather than when the decoder
+finished with it, overlapping utterances are written in the order they were
+said, a line jay does not trust stays in the record marked, and the notes are
+written when the session ends.
 
 ### What works
 
@@ -743,7 +743,7 @@ rate the headphones feel like — held up unattended for the whole session.
 Also verified along the way: preflight on all five lines, `medium.en` decoding at
 11.5× real time, zero dropped samples with 340µs worst queue lag, session
 archiving, screen capture, six modes, diagrams drawn in the panel and importable
-straight into Excalidraw, and a clean exit. 114 tests.
+straight into Excalidraw, and a clean exit. 129 tests.
 
 **The notes work, on two transcripts.** One dictated interview opening and one
 hand-written two-sided conversation built to trip them up. Both held: an
@@ -754,16 +754,21 @@ resting on a `?` line was carried across with the caveat rather than asserted �
 including quoting the transcriber's mangled "Petrino" for Patroni rather than
 silently correcting it into a claim.
 
-A third, end to end: dictated through the speakers, transcribed live off the
-system tap, and summarised when Ctrl-C ended the session. The interesting part
-was the failure it did not make. The speakers bled into the microphone, so two
-sentences appear in the archive twice — once as `them`, once as `you` — with a
-notice underneath saying which copy was the room. Handed that, the notes
-correctly reported one speaker and said so in a footnote, rather than inventing
-a second person who agreed with the first.
+**Then a real one: 75 minutes, 550 stamped lines, unattended.** The notes off
+that transcript are the best evidence this half of jay works. They separated
+about thirty minutes of engineering from forty-five minutes of tangent and said
+so in the opening sentence rather than pretending the whole thing was a
+meeting; `Decisions: - none`, which was the honest answer and the one most
+likely to be faked; three actions, each cited; a topic that came up twice given
+two ranges in the thread.
 
-Two synthetic transcripts and one one-minute session is not a forty-minute
-meeting, and nobody has run one.
+The mechanisms held up at that length too. **One ordering inversion in 550
+lines**, and it is precisely the case the three-second reorder window is
+documented as unable to fix — a 25-second question decoded after three shorter
+utterances that began later. The `hh:mm:ss` clock ran to 1:15:14. And the
+brief-and-faint filter, at its deliberately weak 0.012, held back **two lines in
+75 minutes, both of them a single word**: "Ah." and "But." That question is
+closed.
 
 ### What does not
 
@@ -779,42 +784,61 @@ from before the problem was stated, and `q&a` is forbidden from drawing a
 diagram. It now announces what each round gives when you throw it, which is a
 sticking plaster over a switch that is still easy to leave in the wrong place.
 
-**The brief-and-faint filter was calibrated against a loudspeaker.** A speaker
-playing into the microphone reads 0.06–0.15; a person being interviewed reads
-0.02–0.03. The threshold sat at 0.03, in the middle of the range it was meant to
-be under, and dropped ten of the candidate's utterances in forty minutes. It is
-now 0.012, which is deliberately weak, and every drop records the words it threw
-away so the next calibration can be evidence rather than a third guess.
+**Two filters were deleting real speech, and one recording found both.** The
+artefact list matched `"the end"`, `".com"` and `"www."` anywhere in a line, so
+"at the end of the day", "hit the endpoint" and any sentence citing a document
+were binned as whisper inventions; the meeting lost two sentences that way, one
+of them the only technical proposal in its first two minutes. And every session
+was primed as an algorithms interview, including that one — at 25:29 the
+decoder gave up and recited the prompt back, so the transcript contains a
+sentence about binary trees that nobody said. Both are fixed; both had been in
+the tree for months, doing this quietly, on every session.
+
+**Everyone on the far side is `them`.** One person or six, jay cannot tell,
+because the separation it has is physical — two microphones — rather than
+acoustic. Splitting the far side needs real diarization and is a different
+project.
+
+**The mute switch needs a mouse.** Clicking it means focusing the panel
+mid-meeting, which is exactly when you do not want to be hunting for a window.
+A global hotkey needs a `CGEventTap` and an Accessibility permission.
 
 ### Next, when it is picked up again
 
-1. **Read one session's `?` lines.** The filter no longer removes them from the
-   record, only from the model's context, and the reason sits on the line
-   beneath each one. That single reading says whether it is holding back
-   sentences or "mm-hm"s, and no further guessing about thresholds should
-   happen until it has been done.
-2. **Latency is the whole problem.** It is dominated by output length, not
-   thinking, so the lever is shorter answers or a smaller model for `q&a` —
-   where the reply is 120 words of prose and Opus is arguably not needed.
+1. **A mute hotkey.** The switch works and reaching it does not. A `CGEventTap`
+   and an Accessibility permission, so an afternoon rather than a line.
+2. **Shrink the panel's prompt.** The ask-jay path still sends 42,535 tokens,
+   about 19,000 of them definitions for tools it is not allowed to call. The
+   notes path does the same job in 13,609 — see
+   [shedding the agent](#shedding-the-agent). Latency here has only ever moved
+   when the prompt or the output got shorter, and the risk is that the answers
+   lean on Claude Code's system prompt for formatting in ways that only testing
+   will show.
 3. **Make the round harder to get wrong.** Announcing the mode is not enough.
    Either infer it, or stop `q&a` and `design` being mutually exclusive.
-4. **The last of the cross-channel bleed.** Built, and it turned out not to be
-   about loudness at all — see below. Four of the five wrong lines in the
-   recorded meeting are now caught; the fifth is a microphone fragment
-   straddling the boundary between two system utterances, contained by neither,
-   and loosening the rule far enough to catch it would cost more than it is
-   worth.
-5. **A live design round.** No diagram has ever been produced in an actual
+4. **A live design round.** No diagram has ever been produced in an actual
    interview, so the whole design half remains unproven where it counts.
+
+The cross-channel bleed suppressor came off this list. It was designed as a
+loudness rule for a year and built as a containment rule in an afternoon, once
+there was a recording to look at.
 
 ### The lesson worth keeping
 
 Three of the filters in this repository were built by reasoning about how a
 failure ought to work, and none of them touched it. The one that worked came
 from twenty minutes of logging a repeatable session. `scripts/dictate.sh` exists
-for that reason: it reads an interviewer script aloud through the output device
-so the tap hears it as the other person, which makes a session repeatable, which
-makes it measurable. Build the harness first.
+for that reason: it reads a script aloud through the output device so the tap
+hears it as the other person, which makes a session repeatable, which makes it
+measurable. Build the harness first.
+
+One 75-minute recording then found two filters that had been deleting real
+speech for months, closed a threshold question that three rounds of guessing had
+not, and replaced the bleed suppressor's central assumption — it was going to
+compare loudness, and the thing that actually separates the room from a person
+is whether one utterance sits inside another. None of that was visible from
+here. It was visible the moment somebody put the thing in a real meeting and
+read the file afterwards.
 
 ## Layout
 
@@ -822,7 +846,8 @@ makes it measurable. Build the harness first.
 crates/
   jay-audio   capture, resampling, VAD, the macOS shim
   jay-stt     the SpeechModel trait and whisper.cpp behind it
-  jay-agent   the gate, context selection, prompts, screen capture, archiving
+  jay-agent   the gate, context selection, prompts, screen capture, archiving,
+              echo suppression, and the meeting notes
   jay-ui      the panel
   jay         the binary that wires it together
 docs/
@@ -830,7 +855,7 @@ docs/
   mock-session.md   a runbook for an actual practice session
 scripts/
   bundle.sh         copy the binary into the .app, for permissions
-  dictate.sh        read an interviewer script aloud, so a session repeats
+  dictate.sh        read a script aloud through the speakers, so a session repeats
 ```
 
 ## Licence
