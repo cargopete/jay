@@ -305,9 +305,13 @@ struct TranscribeArgs {
     /// Extra words to expect, comma separated.
     ///
     /// Primes the transcriber. Names, product names and the jargon of this
-    /// particular round are worth adding: whisper decodes conditioned on
-    /// what it is told to expect, and the problem statement is the one
-    /// sentence spoken exactly once.
+    /// particular meeting are worth adding: whisper decodes conditioned on
+    /// what it is told to expect.
+    ///
+    /// Nothing is primed unless you say so, which is a change: every session
+    /// used to be told it was an algorithms interview, including the ones that
+    /// were not. Pass `interview` for that built-in list when the round really
+    /// is one.
     #[arg(long)]
     vocab: Option<String>,
     /// Do not write the meeting notes when the session ends.
@@ -787,6 +791,19 @@ fn notes_for_session(path: &std::path::Path, model: &str) {
     }
 }
 
+/// `interview` names the built-in list; anything else is taken literally.
+///
+/// One keyword rather than a `--vocab-preset` flag nobody would find. The list
+/// is genuinely useful for the round it was measured on and actively harmful
+/// everywhere else, so it has to be easy to ask for and impossible to get by
+/// accident.
+fn expand_vocab(vocab: &str) -> String {
+    if vocab.trim().eq_ignore_ascii_case("interview") {
+        return jay_stt::whisper::INTERVIEW_VOCABULARY.to_string();
+    }
+    vocab.to_string()
+}
+
 /// The closing line of a session.
 fn report(written: &Written, path: &std::path::Path) {
     if written.spoken == 0 && written.unsure == 0 {
@@ -1241,7 +1258,7 @@ fn run_pipeline(
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
     if let Some(vocab) = &vocab {
         // Commas are how a person writes a word list; whisper wants prose.
-        whisper.prime(&vocab.replace(',', " "));
+        whisper.prime(&expand_vocab(vocab).replace(',', " "));
     }
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(512);
@@ -2620,6 +2637,22 @@ mod tests {
             "{midway}"
         );
         assert_eq!(written.spoken, 2);
+    }
+
+    #[test]
+    fn interview_is_the_one_word_that_means_the_built_in_list() {
+        assert_eq!(
+            expand_vocab("interview"),
+            jay_stt::whisper::INTERVIEW_VOCABULARY
+        );
+        assert_eq!(expand_vocab("  Interview "), jay_stt::whisper::INTERVIEW_VOCABULARY);
+        // Everything else is taken at face value, including something that
+        // merely mentions the word.
+        assert_eq!(
+            expand_vocab("interview panel, Patroni"),
+            "interview panel, Patroni"
+        );
+        assert_eq!(expand_vocab("Fathom, MCP, Patroni"), "Fathom, MCP, Patroni");
     }
 
     #[test]

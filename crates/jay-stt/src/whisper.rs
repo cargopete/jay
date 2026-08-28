@@ -24,13 +24,24 @@ pub struct Whisper {
     vocabulary: &'static str,
 }
 
-/// The vocabulary every session gets, before anything problem-specific.
+/// The interview vocabulary, available on request as `--vocab interview`.
 ///
+/// **Not applied by default, and it used to be.** Every session got this,
+/// including a 75-minute meeting about knowledge graphs and MCP servers, which
+/// was told before every utterance that it was listening to an algorithms
+/// interview. Priming is not a hint the decoder is free to ignore: it
+/// conditions the output, so a wrong vocabulary is worse than none. That
+/// meeting has the receipt — at 25:29 the decoder gave up and recited the
+/// prompt back, and the transcript contains the line "This is a technical
+/// interview about algorithms and system design", said by nobody.
+///
+/// It earns its place when the round really is an interview. Untuned,
+/// `small.en` heard "reverse the linked list" as "reverse the link please".
 /// Two registers, because both appear in the same sentence: the language of
 /// algorithmic interviews, and the language of the work itself. Terms are
 /// chosen for being both likely and easy to mishear — "idempotent" and
 /// "jemalloc" are the sort of word a general model has no reason to reach for.
-const DEFAULT_VOCABULARY: &str = "This is a technical interview about \
+pub const INTERVIEW_VOCABULARY: &str = "This is a technical interview about \
 algorithms and system design. Likely terms: linked list, binary tree, hash \
 map, breadth-first search, depth-first search, dynamic programming, two \
 pointers, sliding window, time complexity, space complexity, big O, amortised, \
@@ -80,25 +91,27 @@ impl Whisper {
             state,
             threads,
             name,
-            vocabulary: DEFAULT_VOCABULARY,
+            vocabulary: "",
         })
     }
 
-    /// Prime the decoder with the vocabulary of the round.
+    /// Prime the decoder with the words this session expects to hear.
     ///
     /// whisper decodes conditioned on a prompt, so telling it which words are
-    /// likely is the cheapest accuracy there is. Untuned, `small.en` heard
-    /// "reverse the linked list" as "reverse the link please" — jay answered
-    /// correctly anyway because the surrounding context carried it, but the
-    /// same failure on the problem statement itself would poison everything
-    /// downstream, and that is the one sentence spoken only once.
+    /// likely is the cheapest accuracy there is — and telling it the wrong
+    /// ones is the cheapest way to make things worse. Nothing is primed unless
+    /// a caller asks; see [`INTERVIEW_VOCABULARY`] for what asking used to
+    /// cost when the answer was always yes.
     ///
     /// Leaked deliberately: the params borrow for `'static`, this is set once
     /// per process, and the alternative is threading a lifetime through the
     /// whole model for a few hundred bytes.
     pub fn prime(&mut self, vocabulary: &str) {
-        let combined = format!("{DEFAULT_VOCABULARY} {}", vocabulary.trim());
-        self.vocabulary = Box::leak(combined.into_boxed_str());
+        let vocabulary = vocabulary.trim();
+        if vocabulary.is_empty() {
+            return;
+        }
+        self.vocabulary = Box::leak(vocabulary.to_string().into_boxed_str());
     }
 
     /// Free of `self` so the immutable borrow does not collide with the

@@ -90,31 +90,66 @@ pub fn is_hallucination(text: &str) -> bool {
         ".",
     ];
 
-    /// Phrases whisper produces from silence, in whole or in part.
+    /// Phrases whisper produces from silence, anywhere in the line.
     ///
     /// These are not guesses. Whisper's training data is heavy with subtitled
     /// video, so given nothing to transcribe it reaches for the way videos
     /// end. A 90-second recording of an empty room produced "I'll see you next
-    /// time" unprompted, which in an interview would quietly poison the
-    /// context with a sentence nobody said.
-    const OUTRO_FRAGMENTS: &[&str] = &[
+    /// time" unprompted, which would quietly poison a transcript with a
+    /// sentence nobody said.
+    ///
+    /// Every entry here is a phrase nobody says in a meeting. That is the bar
+    /// for being on this list rather than [`SIGN_OFFS`], and it is a bar three
+    /// entries used to fail.
+    const CREDITS: &[&str] = &[
         "thanks for watching",
         "thank you for watching",
-        "see you next time",
-        "see you in the next",
         "don't forget to subscribe",
         "like and subscribe",
         "subscribe to my channel",
         "hit the bell",
         "please subscribe",
-        "bye bye",
-        "the end",
         "transcription by",
         "subtitles by",
+        "amara.org",
+    ];
+
+    /// Artefacts whose words are also ordinary speech.
+    ///
+    /// Only an artefact when they are *all* that was said, which is why these
+    /// are checked against short utterances only. Matched anywhere in a line,
+    /// as they were until a 75-minute meeting was recorded, they are a
+    /// disaster:
+    ///
+    /// ```text
+    /// "at the end of the day we should just cache it"   -> dropped
+    /// "hit the endpoint and see what comes back"        -> dropped
+    /// "the end user never sees any of that"             -> dropped
+    /// "it is documented at nuthatch-indexer.com"        -> dropped
+    /// ```
+    ///
+    /// Two real sentences went that way in that meeting, one of them the only
+    /// substantive technical proposal in the first two minutes. "The end" is a
+    /// substring of "the endpoint"; a `.com` is how anybody cites a document.
+    /// Nothing announced it — the words were quoted in a drop notice and the
+    /// transcript simply did not have them.
+    const SIGN_OFFS: &[&str] = &[
+        "see you next time",
+        "see you in the next",
+        "bye bye",
+        "the end",
         "amara.org",
         "www.",
         ".com",
     ];
+
+    /// Longest an utterance can be and still be dismissed as a sign-off.
+    ///
+    /// Whisper's inventions on silence are short — it is filling a gap, not
+    /// composing. Six words keeps "And that's the end", "www.mooji.org" and
+    /// "Bye bye, see you next time", and keeps its hands off every sentence in
+    /// the block comment above.
+    const SIGN_OFF_MAX_WORDS: usize = 6;
 
     let normalised = text.trim().to_ascii_lowercase();
     if normalised.is_empty() || ARTEFACTS.contains(&normalised.as_str()) {
@@ -135,9 +170,14 @@ pub fn is_hallucination(text: &str) -> bool {
         return true;
     }
 
-    OUTRO_FRAGMENTS
-        .iter()
-        .any(|fragment| normalised.contains(fragment))
+    if CREDITS.iter().any(|fragment| normalised.contains(fragment)) {
+        return true;
+    }
+
+    // Short enough to be something whisper made up rather than something
+    // somebody said.
+    normalised.split_whitespace().count() <= SIGN_OFF_MAX_WORDS
+        && SIGN_OFFS.iter().any(|fragment| normalised.contains(fragment))
 }
 
 /// Is this transcript a piece of the prompt the decoder was primed with?
@@ -427,6 +467,45 @@ mod tests {
     const PRIMED: &str = "Likely terms: linked list, binary tree, hash map, \
         big O, Postgres, Kafka, Redis, S3. Also: pastebin, base62, flood fill, \
         union-find, usize, HAProxy, nginx, MinIO, Patroni, Redis, Kafka";
+
+    /// A 75-minute meeting lost two real sentences to substring matches on
+    /// "the end" and ".com". Every line here is the shape of ordinary
+    /// technical speech, rewritten from that recording rather than quoted
+    /// from it, and every one of them was silently deleted.
+    #[test]
+    fn ordinary_speech_that_happens_to_contain_a_sign_off_survives() {
+        for said in [
+            "at the end of the day we should just cache it and move on",
+            "hit the endpoint and see what comes back before we change anything",
+            "the end user never sees any of that, it is all server side",
+            "there is a write-up at nuthatch-indexer.com if you want the detail",
+            "the spec lives on www.example.com and it has not been updated since March",
+            "so the end state is one collection with two levels of abstraction in it",
+        ] {
+            assert!(!is_hallucination(said), "deleted real speech: {said}");
+        }
+    }
+
+    /// The same words, short and alone, are still what whisper writes when
+    /// handed a silent room.
+    #[test]
+    fn a_bare_sign_off_is_still_an_artefact() {
+        assert!(is_hallucination("And that's the end."));
+        assert!(is_hallucination("See you next time!"));
+        assert!(is_hallucination("Bye bye."));
+        assert!(is_hallucination("www.mooji.org"));
+    }
+
+    /// Subtitle credits never appear in a meeting, so they are caught wherever
+    /// they sit and however long the line is.
+    #[test]
+    fn credits_are_caught_at_any_length() {
+        assert!(is_hallucination(
+            "And that is it for this talk, thanks for watching, do let me know \
+             in the comments below what you would like to see covered next"
+        ));
+        assert!(is_hallucination("Subtitles by the Amara.org community"));
+    }
 
     #[test]
     fn the_transcriber_reciting_its_own_vocabulary_is_caught() {

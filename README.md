@@ -198,9 +198,26 @@ jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
 | `--model` | `tiny`, `base`, `small`, `medium`, `turbo`. Default `medium`. |
-| `--vocab` | Extra words to expect, comma separated. Primes the transcriber. |
+| `--vocab` | Extra words to expect, comma separated. Nothing is primed unless you ask. `--vocab interview` loads the built-in algorithms list. |
 | `--no-notes` | Do not write the meeting notes when the session ends. |
 | `--notes-model` | Which model writes them. Default `claude-sonnet-5`. |
+
+### Priming
+
+Whisper decodes conditioned on a prompt, so telling it which words to expect is
+the cheapest accuracy available. Untuned, `small.en` heard "reverse the linked
+list" as "reverse the link please".
+
+**Nothing is primed by default, and it used to be.** Every session was told it
+was an algorithms interview, which is wrong for almost every session and not a
+hint the decoder is free to ignore. A 75-minute meeting about knowledge graphs
+and MCP servers has the receipt: at 25:29 the decoder gave up and recited its
+own prompt back, and the transcript contains the sentence "This is a technical
+interview about algorithms and system design", said by nobody.
+
+Pass `--vocab "Fathom, Patroni, MinIO"` with the names and jargon of the
+meeting you are about to have. Pass `--vocab interview` when the round really
+is one, for the built-in list.
 
 ### Mute
 
@@ -478,6 +495,15 @@ utterances that way, leaving nothing behind but a duration and a peak.
 
 Words nobody said are still dropped outright: known whisper artefacts, and the
 decoder reciting its own `--vocab` back. Those get a notice rather than a line.
+
+The artefact list has two halves, and it did not always. Subtitle credits
+("thanks for watching", "amara.org") are caught anywhere in a line, because
+nobody says them in a meeting. Sign-offs whose words are also ordinary speech
+("the end", "www.", ".com") are only caught when they are *all* that was said.
+Matched anywhere, as they were until a real meeting was recorded, they delete
+"at the end of the day", "hit the endpoint", "the end user", and any sentence
+citing a `.com`. Two real sentences went that way in 75 minutes, one of them
+the only technical proposal in the first two minutes, and nothing announced it.
 
 It is written to be *replayed*, not merely read:
 
