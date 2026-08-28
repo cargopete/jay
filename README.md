@@ -226,6 +226,11 @@ YOU   ▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░�
 THEM  ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░   SPEECH MUTE
 ```
 
+The words are anchored to the right edge and the bar takes what is left. It
+shipped the other way round for about an hour — a fixed width reserved for the
+status word, sized before there was a switch after it — and the switch rendered
+off the edge of the panel as "MU".
+
 The bar keeps moving while it is muted, deliberately. A muted meter that went
 flat would be indistinguishable from a microphone that had died, and jay has
 lost a session to exactly that class of confusion before. Throwing the switch

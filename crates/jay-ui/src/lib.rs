@@ -572,22 +572,18 @@ impl Overlay {
         ui.horizontal(|ui| {
             ui.label(stencil(label));
 
-            let width = (ui.available_width() - 78.0).max(60.0);
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 2.0, INSET);
-            ui.painter().rect_stroke(
-                rect,
-                2.0,
-                egui::Stroke::new(1.0, SEAM),
-                egui::StrokeKind::Inside,
-            );
-            if reading.fraction > 0.0 {
-                let mut fill = rect.shrink(1.5);
-                fill.set_width((rect.width() - 3.0) * reading.fraction);
-                ui.painter().rect_filled(fill, 1.0, colour);
-            }
-
+            // Right to left, so the words on the right are placed first and
+            // the bar takes whatever is left over.
+            //
+            // This used to reserve a fixed 78 points for the status word and
+            // give the bar the rest, which was fine while the word was the
+            // last thing on the row. Adding the mute switch after it pushed
+            // past the edge of the panel and the switch rendered as "MU" —
+            // present, unreadable, and mostly unclickable. A hard-coded width
+            // for text of varying length is a bug waiting for the day
+            // somebody adds one more word, and that day was the same
+            // afternoon.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // The word beside the meter is the diagnosis. The two channels
             // need different words, because absence means opposite things on
             // them and calling both "stalled" cries wolf once a minute.
@@ -605,6 +601,14 @@ impl Overlay {
             let waited = self.started.elapsed() > SETTLE;
             let live_mic = channel == jay_audio::Channel::Mic;
             let muted = self.levels.meter(channel).is_muted();
+
+            // The switch sits on the channel it silences rather than in the
+            // bank below, because "which one does this mute" should not be a
+            // question anybody has to ask mid-meeting.
+            if self.expected[slot] && Self::toggle(ui, "mute", muted) {
+                self.levels.meter(channel).set_muted(!muted);
+            }
+
             let (word, tint) = if muted {
                 // Outranks every diagnosis below. A muted channel is not
                 // stalled, not quiet and not at fault; it is switched off on
@@ -633,12 +637,24 @@ impl Overlay {
                     .color(tint),
             );
 
-            // The switch sits on the channel it silences rather than in the
-            // bank below, because "which one does this mute" should not be a
-            // question anybody has to ask mid-meeting.
-            if self.expected[slot] && Self::toggle(ui, "mute", muted) {
-                self.levels.meter(channel).set_muted(!muted);
+            // Whatever is left after the words. The bar is the one thing on
+            // the row that can afford to be short.
+            let width = ui.available_width().max(40.0);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, INSET);
+            ui.painter().rect_stroke(
+                rect,
+                2.0,
+                egui::Stroke::new(1.0, SEAM),
+                egui::StrokeKind::Inside,
+            );
+            if reading.fraction > 0.0 {
+                let mut fill = rect.shrink(1.5);
+                fill.set_width((rect.width() - 3.0) * reading.fraction);
+                ui.painter().rect_filled(fill, 1.0, colour);
             }
+            });
         });
     }
 }
