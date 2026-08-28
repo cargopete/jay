@@ -20,8 +20,14 @@ what, what nobody answered, each line citing the moment it came from.
 Whisper runs locally. The notes are one call to Claude at the end — the only
 thing that leaves the machine, and only ever the text.
 
-**And a panel, if you ask for one.** `jay --overlay` puts a small floating
-window above everything with a button on it. That half was built for practising
+It opens a small panel above everything, showing the transcript as it arrives,
+a level meter per channel, and a **MUTE** switch on each. Muting in a call
+application mutes that application, not the microphone — jay opens the device
+itself — so the switch is here because there is nothing to detect. Add
+`--terminal` if you would rather it just printed.
+
+**And a button, if you want one.** The panel has one, and it was built for
+practising
 technical interviews with a partner playing interviewer: press the button and
 you get working code for an algorithmic question, a diagram for a design
 question, or a short nudge if you would rather work it out yourself. Afterwards
@@ -96,7 +102,7 @@ Then run it. To transcribe a meeting and nothing else, in a terminal:
 jay
 ```
 
-Both sides, no time limit, no panel. Ctrl-C when the meeting ends. The
+Both sides, no time limit. Ctrl-C when the meeting ends, or close the panel. The
 transcript is written as it goes, so it survives whatever happens to the
 process afterwards, and when it ends jay writes the meeting notes beside it —
 what was decided, who owes what, what nobody answered — each line citing the
@@ -104,11 +110,13 @@ timestamp it came from. That last part is the only thing a bare `jay` spends
 anything on, and `--no-notes` turns it off. The session says which it is doing
 before it starts listening.
 
-For the interview panel, which is the same transcriber with a button on it:
+`--mode coding` starts the button on the round you want, for the interview
+half. Launching from the `.app` bundle rather than the binary is what gets you
+Screen Recording, which the "ask jay" button needs and the transcriber does
+not:
 
 ```sh
-open -n -a ~/Projects/jay/target/release/jay.app --args \
-  --overlay --mode coding
+open -n -a ~/Projects/jay/target/release/jay.app --args --mode coding
 ```
 
 A small dark panel appears above everything, draggable by its header. Talk.
@@ -161,8 +169,8 @@ cargo run --release -p jay -- transcribe --seconds 20
 | --- | --- |
 | `jay check` | Try every permission, weight and credential for real. Run before a session. |
 | `jay demo` | Draw the panel with sample content and no audio. `--state empty\|writing\|answered\|design`. |
-| `jay` | The default. Listen to both sides and write the transcript. Nothing else. |
-| `jay --overlay` | The same, with the panel and the button that answers when asked. |
+| `jay` | The default. Listen to both sides, show the panel, write the transcript and the notes. |
+| `jay --terminal` | The same, printing to the terminal instead of opening the panel. |
 | `jay ask "<question>"` | One-shot, no audio. The fastest way to see what a mode gives you. |
 | `jay notes <session.md>` | Write the meeting notes for a session already recorded. |
 | `jay brief --out brief.md` | Build standing context from your memory index. |
@@ -176,15 +184,16 @@ The default command, so `jay` and `jay transcribe` are the same thing. Both
 sides, no time limit, terminal output.
 
 ```sh
-jay --overlay --mode coding --brief brief.md --vocab "union-find, Patroni"
+jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 ```
 
 | Flag | |
 | --- | --- |
 | `--source` | `mic`, `system`, or `both`. Default `both`; it is what lets jay tell you apart. |
 | `--seconds` | Default `0`: runs until Ctrl-C, or until you close the panel. |
-| `--overlay` | Floating panel instead of terminal output. Without it there is no button, so nothing can be spent. |
-| `--mode` | Which round to start in. Switchable in the panel afterwards. Does nothing without `--overlay`. |
+| `--terminal` | Print instead of opening the panel. There is then no mute switch and no button, so nothing can be spent. |
+| `--muted` | Start with the microphone muted. Throw MUTE in the panel to change it mid-meeting. |
+| `--mode` | Which round to start in. Switchable in the panel afterwards. Does nothing with `--terminal`. |
 | `--brief` | Standing context for the session. |
 | `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
@@ -192,6 +201,38 @@ jay --overlay --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--vocab` | Extra words to expect, comma separated. Primes the transcriber. |
 | `--no-notes` | Do not write the meeting notes when the session ends. |
 | `--notes-model` | Which model writes them. Default `claude-sonnet-5`. |
+
+### Mute
+
+**Muting yourself in Zoom, Meet or Teams does not mute your microphone.** It
+mutes that application's outgoing stream. jay opens the input device directly
+through CoreAudio, so as far as it is concerned nothing happened: it goes on
+transcribing you, and files it under `you`.
+
+Which is bad in the obvious direction and worse in the other one. Muted in a
+call, you are not wearing headphones, so the other person's voice comes out of
+your speakers, into your live microphone, and is archived as something you
+said. The echo suppressor catches the clean cases — the same sentence on both
+channels, one copy dropped — but a copy that crossed a desk often does not
+transcribe cleanly enough to match, and then it is just fluent invented English
+attributed to you.
+
+macOS has no global microphone mute for jay to read, and a call application's
+mute is private to that application. There is nothing to detect. So there is a
+switch, on the meter of the channel it silences:
+
+```
+YOU   ▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░   MUTED  MUTE
+THEM  ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░   SPEECH MUTE
+```
+
+The bar keeps moving while it is muted, deliberately. A muted meter that went
+flat would be indistinguishable from a microphone that had died, and jay has
+lost a session to exactly that class of confusion before. Throwing the switch
+mid-sentence discards whatever the VAD was holding rather than emitting it on
+unmute.
+
+`--muted` starts that way, for sitting in on something you are not speaking in.
 
 ### `notes`
 

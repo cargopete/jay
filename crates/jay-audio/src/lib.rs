@@ -93,6 +93,20 @@ pub struct Meter {
     frames: std::sync::atomic::AtomicU64,
     /// Whether the segmenter currently has this channel open as speech.
     speaking: std::sync::atomic::AtomicBool,
+    /// Heard, but not recorded.
+    ///
+    /// Muting in a call application mutes *that application's* stream. It does
+    /// not mute the microphone, and it cannot: jay opens the device itself
+    /// through CoreAudio, so a muted call is a live microphone as far as this
+    /// is concerned. Everything said in the room while you are muted is
+    /// transcribed and attributed to you, including the other person's voice
+    /// coming back out of your own speakers.
+    ///
+    /// So this is a switch a person throws, because there is nothing to detect.
+    /// The level keeps being recorded while it is on — a muted meter that
+    /// still moves is the difference between "jay is ignoring me" and "jay has
+    /// died" — and the frames stop reaching the segmenter.
+    muted: std::sync::atomic::AtomicBool,
 }
 
 impl Meter {
@@ -105,6 +119,19 @@ impl Meter {
     pub fn set_speaking(&self, speaking: bool) {
         self.speaking
             .store(speaking, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stop this channel reaching the transcript, or let it through again.
+    ///
+    /// Set by the panel, read by the capture loop on every frame, so a click
+    /// takes effect within one 32 ms window.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted
+            .store(muted, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Current level, total frames seen, and whether the VAD is open.

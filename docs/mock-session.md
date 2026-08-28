@@ -51,7 +51,7 @@ there is no reason to quit and relaunch in the middle:
 
 ```sh
 open -n -a ~/Projects/jay/target/release/jay.app --args \
-  transcribe --overlay --source both --mode coding --seconds 0 \
+  transcribe --source both --mode coding \
   --brief ~/Library/Application\ Support/jay/brief.md \
   --vocab "SiloBin, pastebin, base62, Redpanda, idempotent, jemalloc"
 ```

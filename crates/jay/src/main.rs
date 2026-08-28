@@ -257,9 +257,24 @@ struct TranscribeArgs {
     /// stops without saying so.
     #[arg(short, long, default_value_t = 0)]
     seconds: u64,
-    /// Show the transcript in a floating overlay instead of the terminal.
+    /// Print to the terminal instead of opening the panel.
+    ///
+    /// The panel is the default. It is where the mute switches live, and a
+    /// transcriber whose only interface is a scrolling terminal gives you no
+    /// way to stop it recording without killing it.
     #[arg(long)]
+    terminal: bool,
+    /// Kept so `--overlay` does not break; the panel is the default now.
+    #[arg(long, hide = true)]
     overlay: bool,
+    /// Start with the microphone muted.
+    ///
+    /// For sitting in on something you are not speaking in. Muting in a call
+    /// application does not mute the microphone — jay opens the device itself
+    /// — so without this jay hears you, and hears the other person coming out
+    /// of your speakers, and files both under "you".
+    #[arg(long)]
+    muted: bool,
     /// What kind of help to offer when you press the button.
     ///
     /// Only reachable from the panel, so this does nothing without
@@ -592,7 +607,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         (save_tx, Some(handle))
     };
 
-    if !args.overlay {
+    if args.terminal {
         let printer = std::thread::Builder::new()
             .name("jay-printer".into())
             .spawn(move || {
@@ -624,6 +639,8 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         // No panel means no button, so no request channel — and therefore no
         // assistant thread and nothing that can spend money. A terminal run
         // of jay is a transcriber, full stop.
+        let levels = std::sync::Arc::new(jay_audio::Levels::default());
+        levels.mic.set_muted(args.muted);
         let result = run_pipeline(
             source,
             args.device.as_deref(),
@@ -633,7 +650,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
             assist,
             None,
             brief,
-            std::sync::Arc::new(jay_audio::Levels::default()),
+            levels,
             args.vocab.clone(),
             epoch,
             notes_at_the_end,
@@ -654,6 +671,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
     // arriving and a sentence appearing there are about ten seconds, and for
     // those ten seconds a dead microphone looks exactly like a quiet room.
     let levels = std::sync::Arc::new(jay_audio::Levels::default());
+    levels.mic.set_muted(args.muted);
 
     // The whole pipeline moves to a background thread: on macOS the windowing
     // event loop insists on the main thread and will not negotiate.
@@ -1636,6 +1654,7 @@ fn run_pipeline(
     let started = Instant::now();
     let unlimited = seconds == 0;
     let mut skipped_utterances = 0u64;
+    let (mut mic_was_muted, mut system_was_muted) = (false, false);
 
     // Both voices arriving on the microphone is not a fault jay can fix, and it
     // ruins everything downstream: attribution collapses, the problem statement
@@ -1658,11 +1677,20 @@ fn run_pipeline(
             "Stopping when the clock runs out, or on Ctrl-C."
         }
     );
+    if levels.mic.is_muted() {
+        let _ = notices.send(jay_ui::Line::notice(
+            "the microphone is muted: it is being metered and not transcribed. \
+             Throw MUTE beside the you meter to record yourself."
+                .to_string(),
+        ));
+    }
     if notes_at_the_end {
         // Said at the start rather than discovered at the end. It is the only
         // thing a bare `jay` spends anything on, and a charge nobody was told
         // about is a charge nobody agreed to.
-        println!("  (notes will be written when this ends. --no-notes to skip.)\n");
+        let _ = notices.send(jay_ui::Line::notice(
+            "notes will be written when this ends. --no-notes to skip.".to_string(),
+        ));
     }
 
     while !INTERRUPTED.load(Relaxed)
@@ -1720,6 +1748,31 @@ fn run_pipeline(
             Channel::Mic => &mut mic_segmenter,
             Channel::System => &mut system_segmenter,
         };
+
+        // Muted: the level is still read above, so the meter goes on moving
+        // and a muted microphone cannot be mistaken for a dead one, but
+        // nothing reaches the transcript.
+        //
+        // The flush on the way in matters. Throwing the switch mid-sentence
+        // leaves the VAD holding half an utterance, and without this it is
+        // emitted the moment you unmute — a fragment of the thing you muted
+        // yourself to keep out, arriving with a timestamp from before you
+        // muted. Discarded rather than sent: that is what the switch is for.
+        let muted = meter.is_muted();
+        let was_muted = match frame.channel {
+            Channel::Mic => &mut mic_was_muted,
+            Channel::System => &mut system_was_muted,
+        };
+        if muted {
+            if !*was_muted {
+                *was_muted = true;
+                let _ = segmenter.flush();
+                meter.set_speaking(false);
+            }
+            continue;
+        }
+        *was_muted = false;
+
         let utterance = segmenter.push(&frame);
         meter.set_speaking(segmenter.is_speaking());
 
@@ -2586,7 +2639,11 @@ mod tests {
         assert!(cli.command.is_none());
         assert!(matches!(cli.transcribe.source, Source::Both));
         assert_eq!(cli.transcribe.seconds, 0);
-        assert!(!cli.transcribe.overlay);
+        // The panel, not the terminal. It is where the mute switch is, and a
+        // bare `jay` that opens no window was the first thing anyone using
+        // this complained about.
+        assert!(!cli.transcribe.terminal);
+        assert!(!cli.transcribe.muted);
     }
 
     #[test]
@@ -2598,11 +2655,11 @@ mod tests {
 
     #[test]
     fn naming_the_subcommand_still_works() {
-        let cli = Cli::parse_from(["jay", "transcribe", "--overlay", "--source", "system"]);
+        let cli = Cli::parse_from(["jay", "transcribe", "--terminal", "--source", "system"]);
         let Some(Command::Transcribe(args)) = cli.command else {
             panic!("expected the transcribe subcommand");
         };
-        assert!(args.overlay);
+        assert!(args.terminal);
         assert!(matches!(args.source, Source::System));
     }
 

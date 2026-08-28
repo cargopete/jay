@@ -357,6 +357,29 @@ impl Overlay {
         response.clicked() && !active
     }
 
+    /// A latching toggle, unlike [`switch`](Self::switch), which is a radio
+    /// and refuses the position it is already in.
+    ///
+    /// Ember when engaged, because muted is not a neutral state: it is jay not
+    /// recording somebody, and it must look like a thing that is on.
+    fn toggle(ui: &mut egui::Ui, label: &str, engaged: bool) -> bool {
+        let text = egui::RichText::new(label.to_uppercase())
+            .size(LABEL)
+            .family(egui::FontFamily::Monospace)
+            .color(if engaged { EMBER } else { INK_FAINT });
+        let response = ui
+            .add(egui::Label::new(text).sense(egui::Sense::click()))
+            .on_hover_text(if engaged {
+                "recording this channel again"
+            } else {
+                "stop recording this channel"
+            });
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        response.clicked()
+    }
+
     /// The reading compartment. `lag` present means finished; absent means
     /// still being written, which is drawn in ember rather than brass.
     fn draw_reading(ui: &mut egui::Ui, text: &str, lag: Option<std::time::Duration>) {
@@ -581,7 +604,15 @@ impl Overlay {
             // instrument that can actually tell the difference.
             let waited = self.started.elapsed() > SETTLE;
             let live_mic = channel == jay_audio::Channel::Mic;
-            let (word, tint) = match (self.expected[slot], ever_ran, reading.running) {
+            let muted = self.levels.meter(channel).is_muted();
+            let (word, tint) = if muted {
+                // Outranks every diagnosis below. A muted channel is not
+                // stalled, not quiet and not at fault; it is switched off on
+                // purpose, and the bar beside this word is still moving to
+                // prove the audio is arriving.
+                ("muted", EMBER)
+            } else {
+                match (self.expected[slot], ever_ran, reading.running) {
                 // Never asked for. Correct, and not a fault.
                 (false, _, _) => ("off", INK_FAINT),
                 (true, true, true) if reading.speaking => ("speech", VERDIGRIS),
@@ -593,6 +624,7 @@ impl Overlay {
                 // Asked for, and has never delivered a single frame.
                 (true, false, _) if live_mic => ("no frames", EMBER),
                 (true, false, _) => ("no audio yet", INK_FAINT),
+                }
             };
             ui.label(
                 egui::RichText::new(word.to_uppercase())
@@ -600,6 +632,13 @@ impl Overlay {
                     .family(egui::FontFamily::Monospace)
                     .color(tint),
             );
+
+            // The switch sits on the channel it silences rather than in the
+            // bank below, because "which one does this mute" should not be a
+            // question anybody has to ask mid-meeting.
+            if self.expected[slot] && Self::toggle(ui, "mute", muted) {
+                self.levels.meter(channel).set_muted(!muted);
+            }
         });
     }
 }
