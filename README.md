@@ -7,6 +7,41 @@ The audio never leaves your machine.
 Named for the bird that sits quietly in the canopy watching, and calls the
 moment something is worth calling about. That is roughly the job description.
 
+```sh
+cargo run --release      # Ctrl-C when the meeting ends
+```
+
+What lands on disk while it runs:
+
+```
+[00:00] (listening on you: MacBook Pro Microphone, them: whatever plays through AirPods Pro.)
+[00:21–00:33] them: The problem is a rate limiter, distributed across many nodes.
+[00:34–00:36] you: Right.
+[00:35–00:52] them: And I want the counters consistent without a round trip per request.
+[01:04–01:06] ?you: token bucket, per tenant
+[01:04] (kept the line above out of context — 2.1s at peak 0.009, too brief and too faint)
+```
+
+And what it writes beside it when you stop:
+
+```markdown
+## Decisions
+- **Shard by contract, not a bigger box** — a bigger box buys ~6 weeks
+  and that route has already been tried once [00:20–00:31]
+
+## Actions
+- **you** — do the shard key work, branch up by Wednesday [00:53–01:08]
+- **them** — write the migration plan, present it Thursday [00:34–00:52]
+
+## Open questions
+- How do reorgs that straddle two shards get handled? [01:09–01:20]
+```
+
+Every line cites the moment it came from, because the timestamps are honest
+enough to go back and listen to. `you` and `them` are two separate microphones
+rather than one stream a diarizer has guessed at, so an action assigned to you
+was said by you.
+
 ---
 
 ## What it is
@@ -27,9 +62,8 @@ itself — so the switch is here because there is nothing to detect. Add
 `--terminal` if you would rather it just printed.
 
 **And a button, if you want one.** The panel has one, and it was built for
-practising
-technical interviews with a partner playing interviewer: press the button and
-you get working code for an algorithmic question, a diagram for a design
+practising technical interviews with a partner playing interviewer: press it
+and you get working code for an algorithmic question, a diagram for a design
 question, or a short nudge if you would rather work it out yourself. Afterwards
 it runs the debrief — quotes your attempt back, says what you missed, then
 gives the answer you should have given.
@@ -131,11 +165,12 @@ every transcript line that landed while you read.
 
 Under the meters is a switch bank. **ROUND** picks what the lever answers for —
 `CODE`, `DESIGN`, `Q&A`, `DEBRIEF`, `PAIR`, `DEV` — and **DETAIL** picks `ANSWER`
-or `NUDGE`. Throwing ROUND announces what that round gives, because leaving it in
-the wrong position has already cost one interview its diagram. Throwing either starts a fresh Claude process, so the next press pays
-the 4.7 second startup again; that is the price of not quitting jay in the
-middle of an interview, which is what changing rounds used to cost. `--mode`
-still sets where it starts.
+or `NUDGE`. Throwing ROUND announces what that round gives, because leaving it
+in the wrong position has already cost one interview its diagram. Throwing
+either starts a fresh Claude process, so the next press pays the 4.7 second
+startup again; that is the price of not quitting jay in the middle of an
+interview, which is what changing rounds used to cost. `--mode` still sets where
+it starts.
 
 > Use the absolute path. `open -n -a "$PWD/..."` only works if you are already in
 > the repository, and fails confusingly if you are not.
@@ -201,92 +236,6 @@ jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--vocab` | Extra words to expect, comma separated. Nothing is primed unless you ask. `--vocab interview` loads the built-in algorithms list. |
 | `--no-notes` | Do not write the meeting notes when the session ends. |
 | `--notes-model` | Which model writes them. Default `claude-sonnet-5`. |
-
-### The room, coming back through your microphone
-
-Without headphones the other person's voice leaves your speakers, crosses the
-desk and arrives at your microphone, so it is captured on both channels and one
-copy is blamed on you. Mute stops it while you are quiet; it cannot help the
-moment you unmute to actually say something.
-
-This was going to be judged on loudness — a microphone utterance overlapping a
-system one and much quieter than it is the room. A real 75-minute meeting said
-otherwise. Its opening is one 25-second system utterance against three short
-microphone fragments, each sitting *inside* its span and made of its words,
-because the two channels segment independently and disagree about where the
-sentences are.
-
-So the discriminator is **containment**, and it is better evidence than
-loudness for a reason that has nothing to do with tuning. Restating a question
-back to the interviewer is good practice, word-for-word similar to what was
-asked, and the only thing separating it from an echo is that nobody can begin
-repeating a sentence before it has been said. A restatement therefore starts
-*after* its source ends and is never contained. The rule protects that case by
-construction rather than by a threshold somebody has to guess at.
-
-Two conditions keep it honest. A fragment must be at least four words, and its
-parent at least twice its length — otherwise two people saying "Okay, yeah,
-that sounds right" over each other looks exactly like a whole and a part. That
-one was caught by a test written for the previous version of this, which is the
-argument for keeping tests that assert what must *not* happen.
-
-Replayed against that meeting's opening, four of the five wrongly-attributed
-lines now go. The fifth straddles the boundary between two system utterances
-and is contained by neither.
-
-### Priming
-
-Whisper decodes conditioned on a prompt, so telling it which words to expect is
-the cheapest accuracy available. Untuned, `small.en` heard "reverse the linked
-list" as "reverse the link please".
-
-**Nothing is primed by default, and it used to be.** Every session was told it
-was an algorithms interview, which is wrong for almost every session and not a
-hint the decoder is free to ignore. A 75-minute meeting about knowledge graphs
-and MCP servers has the receipt: at 25:29 the decoder gave up and recited its
-own prompt back, and the transcript contains the sentence "This is a technical
-interview about algorithms and system design", said by nobody.
-
-Pass `--vocab "Fathom, Patroni, MinIO"` with the names and jargon of the
-meeting you are about to have. Pass `--vocab interview` when the round really
-is one, for the built-in list.
-
-### Mute
-
-**Muting yourself in Zoom, Meet or Teams does not mute your microphone.** It
-mutes that application's outgoing stream. jay opens the input device directly
-through CoreAudio, so as far as it is concerned nothing happened: it goes on
-transcribing you, and files it under `you`.
-
-Which is bad in the obvious direction and worse in the other one. Muted in a
-call, you are not wearing headphones, so the other person's voice comes out of
-your speakers, into your live microphone, and is archived as something you
-said. The echo suppressor catches the clean cases — the same sentence on both
-channels, one copy dropped — but a copy that crossed a desk often does not
-transcribe cleanly enough to match, and then it is just fluent invented English
-attributed to you.
-
-macOS has no global microphone mute for jay to read, and a call application's
-mute is private to that application. There is nothing to detect. So there is a
-switch, on the meter of the channel it silences:
-
-```
-YOU   ▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░   MUTED  MUTE
-THEM  ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░   SPEECH MUTE
-```
-
-The words are anchored to the right edge and the bar takes what is left. It
-shipped the other way round for about an hour — a fixed width reserved for the
-status word, sized before there was a switch after it — and the switch rendered
-off the edge of the panel as "MU".
-
-The bar keeps moving while it is muted, deliberately. A muted meter that went
-flat would be indistinguishable from a microphone that had died, and jay has
-lost a session to exactly that class of confusion before. Throwing the switch
-mid-sentence discards whatever the VAD was holding rather than emitting it on
-unmute.
-
-`--muted` starts that way, for sitting in on something you are not speaking in.
 
 ### `notes`
 
@@ -480,6 +429,94 @@ the first answer and 1.7s for the second, including a 75 second idle gap
 between them. The process also keeps the conversation, so the third question of
 a round is asked of something that heard the first two. If it dies, jay
 restarts it and asks again once.
+
+---
+
+### The room, coming back through your microphone
+
+Without headphones the other person's voice leaves your speakers, crosses the
+desk and arrives at your microphone, so it is captured on both channels and one
+copy is blamed on you. Mute stops it while you are quiet; it cannot help the
+moment you unmute to actually say something.
+
+This was going to be judged on loudness — a microphone utterance overlapping a
+system one and much quieter than it is the room. A real 75-minute meeting said
+otherwise. Its opening is one 25-second system utterance against three short
+microphone fragments, each sitting *inside* its span and made of its words,
+because the two channels segment independently and disagree about where the
+sentences are.
+
+So the discriminator is **containment**, and it is better evidence than
+loudness for a reason that has nothing to do with tuning. Restating a question
+back to the interviewer is good practice, word-for-word similar to what was
+asked, and the only thing separating it from an echo is that nobody can begin
+repeating a sentence before it has been said. A restatement therefore starts
+*after* its source ends and is never contained. The rule protects that case by
+construction rather than by a threshold somebody has to guess at.
+
+Two conditions keep it honest. A fragment must be at least four words, and its
+parent at least twice its length — otherwise two people saying "Okay, yeah,
+that sounds right" over each other looks exactly like a whole and a part. That
+one was caught by a test written for the previous version of this, which is the
+argument for keeping tests that assert what must *not* happen.
+
+Replayed against that meeting's opening, four of the five wrongly-attributed
+lines now go. The fifth straddles the boundary between two system utterances
+and is contained by neither.
+
+### Priming
+
+Whisper decodes conditioned on a prompt, so telling it which words to expect is
+the cheapest accuracy available. Untuned, `small.en` heard "reverse the linked
+list" as "reverse the link please".
+
+**Nothing is primed by default, and it used to be.** Every session was told it
+was an algorithms interview, which is wrong for almost every session and not a
+hint the decoder is free to ignore. A 75-minute meeting about knowledge graphs
+and MCP servers has the receipt: at 25:29 the decoder gave up and recited its
+own prompt back, and the transcript contains the sentence "This is a technical
+interview about algorithms and system design", said by nobody.
+
+Pass `--vocab "Fathom, Patroni, MinIO"` with the names and jargon of the
+meeting you are about to have. Pass `--vocab interview` when the round really
+is one, for the built-in list.
+
+### Mute
+
+**Muting yourself in Zoom, Meet or Teams does not mute your microphone.** It
+mutes that application's outgoing stream. jay opens the input device directly
+through CoreAudio, so as far as it is concerned nothing happened: it goes on
+transcribing you, and files it under `you`.
+
+Which is bad in the obvious direction and worse in the other one. Muted in a
+call, you are not wearing headphones, so the other person's voice comes out of
+your speakers, into your live microphone, and is archived as something you
+said. The echo suppressor catches the clean cases — the same sentence on both
+channels, one copy dropped — but a copy that crossed a desk often does not
+transcribe cleanly enough to match, and then it is just fluent invented English
+attributed to you.
+
+macOS has no global microphone mute for jay to read, and a call application's
+mute is private to that application. There is nothing to detect. So there is a
+switch, on the meter of the channel it silences:
+
+```
+YOU   ▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░   MUTED  MUTE
+THEM  ▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░   SPEECH MUTE
+```
+
+The words are anchored to the right edge and the bar takes what is left. It
+shipped the other way round for about an hour — a fixed width reserved for the
+status word, sized before there was a switch after it — and the switch rendered
+off the edge of the panel as "MU".
+
+The bar keeps moving while it is muted, deliberately. A muted meter that went
+flat would be indistinguishable from a microphone that had died, and jay has
+lost a session to exactly that class of confusion before. Throwing the switch
+mid-sentence discards whatever the VAD was holding rather than emitting it on
+unmute.
+
+`--muted` starts that way, for sitting in on something you are not speaking in.
 
 ---
 
@@ -840,6 +877,8 @@ is whether one utterance sits inside another. None of that was visible from
 here. It was visible the moment somebody put the thing in a real meeting and
 read the file afterwards.
 
+---
+
 ## Layout
 
 ```
@@ -858,10 +897,14 @@ scripts/
   dictate.sh        read a script aloud through the speakers, so a session repeats
 ```
 
+---
+
 ## Licence
 
 MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
 [LICENSE-APACHE](LICENSE-APACHE).
+
+---
 
 ## A word about recording people
 
