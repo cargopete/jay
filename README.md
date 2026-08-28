@@ -202,6 +202,38 @@ jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--no-notes` | Do not write the meeting notes when the session ends. |
 | `--notes-model` | Which model writes them. Default `claude-sonnet-5`. |
 
+### The room, coming back through your microphone
+
+Without headphones the other person's voice leaves your speakers, crosses the
+desk and arrives at your microphone, so it is captured on both channels and one
+copy is blamed on you. Mute stops it while you are quiet; it cannot help the
+moment you unmute to actually say something.
+
+This was going to be judged on loudness — a microphone utterance overlapping a
+system one and much quieter than it is the room. A real 75-minute meeting said
+otherwise. Its opening is one 25-second system utterance against three short
+microphone fragments, each sitting *inside* its span and made of its words,
+because the two channels segment independently and disagree about where the
+sentences are.
+
+So the discriminator is **containment**, and it is better evidence than
+loudness for a reason that has nothing to do with tuning. Restating a question
+back to the interviewer is good practice, word-for-word similar to what was
+asked, and the only thing separating it from an echo is that nobody can begin
+repeating a sentence before it has been said. A restatement therefore starts
+*after* its source ends and is never contained. The rule protects that case by
+construction rather than by a threshold somebody has to guess at.
+
+Two conditions keep it honest. A fragment must be at least four words, and its
+parent at least twice its length — otherwise two people saying "Okay, yeah,
+that sounds right" over each other looks exactly like a whole and a part. That
+one was caught by a test written for the previous version of this, which is the
+argument for keeping tests that assert what must *not* happen.
+
+Replayed against that meeting's opening, four of the five wrongly-attributed
+lines now go. The fifth straddles the boundary between two system utterances
+and is contained by neither.
+
 ### Priming
 
 Whisper decodes conditioned on a prompt, so telling it which words to expect is
@@ -766,10 +798,12 @@ away so the next calibration can be evidence rather than a third guess.
    where the reply is 120 words of prose and Opus is arguably not needed.
 3. **Make the round harder to get wrong.** Announcing the mode is not enough.
    Either infer it, or stop `q&a` and `design` being mutually exclusive.
-4. **The cross-channel bleed suppressor**, designed and never built: a
-   microphone utterance overlapping a system utterance and much quieter than it
-   is the room, not the candidate. It needs two real people to calibrate and now
-   there is a recording of two real people.
+4. **The last of the cross-channel bleed.** Built, and it turned out not to be
+   about loudness at all — see below. Four of the five wrong lines in the
+   recorded meeting are now caught; the fifth is a microphone fragment
+   straddling the boundary between two system utterances, contained by neither,
+   and loosening the rule far enough to catch it would cost more than it is
+   worth.
 5. **A live design round.** No diagram has ever been produced in an actual
    interview, so the whole design half remains unproven where it counts.
 

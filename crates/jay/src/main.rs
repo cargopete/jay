@@ -1589,7 +1589,9 @@ fn run_pipeline(
                 let label = utterance.channel.label();
                 match utterance.channel {
                     // Microphone copy, interviewer's voice already recorded.
-                    Channel::Mic if echo.is_echo(utterance.started_at, label, &result.text) => {
+                    Channel::Mic
+                        if echo.is_echo(utterance.started_at, spoken, label, &result.text) =>
+                    {
                         tracing::debug!(text = %result.text, "dropped an echo of the system channel");
                         let _ = lines.send(jay_ui::Line::notice(
                             "dropped an echo of the other channel — wear headphones".to_string(),
@@ -1604,26 +1606,34 @@ fn run_pipeline(
                         // searches only up to the ring buffer's wrap point and
                         // would quietly stop finding things after 600 lines.
                         let lines_so_far = history.make_contiguous();
-                        if let Some(index) =
-                            echo.stale_copy(lines_so_far, Channel::Mic.label(), &result.text)
-                        {
+                        // Descending, so each removal leaves the indices below
+                        // it untouched.
+                        let stale =
+                            echo.stale_copies(lines_so_far, Channel::Mic.label(), &result.text);
+                        for &index in &stale {
                             history.remove(index);
+                        }
+                        if !stale.is_empty() {
                             // Named rather than merely announced, because the
                             // archive is written as lines arrive and cannot be
-                            // edited afterwards: the `you:` copy stays on disk
-                            // even though it has left the context. Whoever
-                            // reads the file back — including `jay ask --mode
-                            // rehearsal` — needs to be told which line it was.
+                            // edited afterwards: the `you:` copies stay on disk
+                            // even though they have left the context. Whoever
+                            // reads the file back — including the notes, and
+                            // `jay ask --mode rehearsal` — needs to be told
+                            // which lines they were.
                             let _ = lines.send(jay_ui::Line::notice(format!(
-                                "the earlier \"you\" copy of \"{}\" was this room, not you; \
+                                "{} earlier \"you\" {} of \"{}\" {} this room, not you; \
                                  dropped from context",
-                                first_words(&result.text, 8)
+                                stale.len(),
+                                if stale.len() == 1 { "copy" } else { "copies" },
+                                first_words(&result.text, 8),
+                                if stale.len() == 1 { "was" } else { "were" },
                             )));
                         }
                     }
                     Channel::Mic => {}
                 }
-                echo.remember(utterance.started_at, label, &result.text);
+                echo.remember(utterance.started_at, spoken, label, &result.text);
 
                 // The first substantial thing the interviewer says is the
                 // problem. Captured once and kept for the whole session.
