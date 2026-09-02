@@ -233,7 +233,7 @@ jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--budget` | Stop suggesting after this many dollars. No limit by default. |
 | `--save` | Override where the session is archived. |
 | `--model` | `tiny`, `base`, `small`, `medium`, `turbo`. Default `medium`. |
-| `--vocab` | Extra words to expect, comma separated. Nothing is primed unless you ask. `--vocab interview` loads the built-in algorithms list. |
+| `--vocab` | Extra words to expect, comma separated. Falls back to `~/.config/jay/vocab`. `--vocab interview` loads the built-in algorithms list. |
 | `--no-echo-gate` | Transcribe your microphone even while the other side is speaking. Off the gate goes; wear headphones. |
 | `--mic-path` | `plain`, `aec`, `bypass`. A measurement tool, not a setting — `aec` loses the `them` channel. |
 | `--no-notes` | Do not write the meeting notes when the session ends. |
@@ -737,6 +737,14 @@ not to wear headphones.
 **"still thinking about the last one".** One suggestion runs at a time, by
 design: the alternative is the transcriber stalling behind it and losing audio.
 
+**The transcriber repeating itself.** A line that says the same clause four or
+more times running is dropped as a decoder loop rather than kept as speech. The
+line that earned the filter was `I'm not sure what to say.` five times over, in
+a silent room with nothing playing, and it had cleared the artefact list, the
+level floor and the confidence floor — all three ask what the words *are*, and
+none of them asks whether the line eats itself. Three repeats survive, because
+"yeah, yeah, yeah" and "good day, good day" are things people actually say.
+
 **Sentences nobody said.** Whisper invents fluent text from silence, reaching
 for the subtitled video it was trained on — "I'll see you next time" appeared in
 90 seconds of an empty room. Known artefacts are filtered and transcripts whose
@@ -780,6 +788,12 @@ The signal that *should* do this job, whisper's own `no_speech_prob`, is dead on
 the English-only weights jay uses — it reads 0.00 even for eight seconds of pure
 digital silence, because it is the probability of a token an `.en` vocabulary
 never predicts. It is recorded and ignored rather than quietly trusted.
+
+**The first seconds of a meeting.** Captures are opened *before* `medium.en`
+loads, so audio spoken during the load is buffered and decoded once the model is
+ready rather than lost. It used to load first, which meant the devices were not
+merely unread during those seconds but not open at all. About the first second
+still goes while the tap itself starts.
 
 **You spoke and nothing appeared.** Watch the `you` meter. If it moves and says
 `SPEECH`, jay heard you and the fault is downstream — look for a

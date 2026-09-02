@@ -334,6 +334,8 @@ pub enum Rejected {
     PrimingEcho,
     /// Too short to be speech, and too faint to be a short answer.
     TooBrief { spoken: Duration, peak: f32 },
+    /// The same clause over and over: the decoder looping on near-silence.
+    Looping,
 }
 
 impl Rejected {
@@ -351,7 +353,7 @@ impl Rejected {
     /// appears is indistinguishable from not having spoken.
     pub fn was_said(&self) -> bool {
         match self {
-            Rejected::KnownArtefact | Rejected::PrimingEcho => false,
+            Rejected::KnownArtefact | Rejected::PrimingEcho | Rejected::Looping => false,
             Rejected::TooQuiet { .. } | Rejected::Invented { .. } | Rejected::TooBrief { .. } => {
                 true
             }
@@ -371,6 +373,7 @@ impl Rejected {
                 "{:.1}s at peak {peak:.3}, too brief and too faint",
                 spoken.as_secs_f32()
             ),
+            Rejected::Looping => "the transcriber repeating itself".to_string(),
         }
     }
 
@@ -403,8 +406,74 @@ impl Rejected {
                 "dropped {:.1}s at peak {peak:.3} — too brief and too faint: {text:?}",
                 spoken.as_secs_f32()
             ),
+            Rejected::Looping => {
+                format!("dropped the transcriber repeating itself: {text:?}")
+            }
         }
     }
+}
+
+/// How many times one clause may repeat before the line is a decoder loop.
+///
+/// Three, so "no, no, no" and "yeah, yeah, yeah" survive — both are ordinary
+/// speech and both appear verbatim in real transcripts from this machine. Four
+/// identical clauses in a row is not emphasis; it is whisper looping on
+/// near-silence:
+///
+/// ```text
+/// [00:29–00:38] you: I'm not sure what to say. I'm not sure what to say. I'm
+///                    not sure what to say. I'm not sure what to say. I'm not
+///                    sure what to say.
+/// ```
+///
+/// Nobody said that. Nothing was playing. It cleared the artefact list, the
+/// level floor and the confidence floor, because all three ask what the words
+/// *are* and none of them asks whether the line eats itself.
+const MAX_CLAUSE_REPEATS: usize = 3;
+
+/// Fewest characters a clause needs before repeating it means anything.
+///
+/// Below this the repetition is punctuation as much as language — "Ah. Ah. Ah.
+/// Ah." is a person reacting, and a filter that bins it is editing the meeting
+/// rather than transcribing it.
+const REPEAT_MIN_CLAUSE: usize = 12;
+
+/// Is this line the decoder looping on itself?
+///
+/// Splits on sentence punctuation rather than on words, because the unit that
+/// loops is the clause. People repeat words constantly and whole clauses almost
+/// never.
+pub fn is_looping(text: &str) -> bool {
+    let clauses: Vec<String> = text
+        .split(['.', '!', '?'])
+        .map(|clause| {
+            clause
+                .trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|clause| clause.len() >= REPEAT_MIN_CLAUSE)
+        .collect();
+
+    // Consecutive runs only. The same sentence twice at either end of a long
+    // answer is a person making a point; back to back it is a loop.
+    let mut run = 1;
+    for pair in clauses.windows(2) {
+        if pair[0] == pair[1] {
+            run += 1;
+            if run > MAX_CLAUSE_REPEATS {
+                return true;
+            }
+        } else {
+            run = 1;
+        }
+    }
+    false
 }
 
 /// Decide whether one transcript is worth keeping.
@@ -424,6 +493,13 @@ pub fn judge(
     }
     if transcription.prompt_echo {
         return Some(Rejected::PrimingEcho);
+    }
+    // Before the level and confidence floors, because a loop clears both. The
+    // run that produced this scored well enough on every measure of what the
+    // words were; the only thing wrong with it was that it said the same thing
+    // five times.
+    if is_looping(&transcription.text) {
+        return Some(Rejected::Looping);
     }
     if speech_peak < SPEECH_PEAK_FLOOR {
         return Some(Rejected::TooQuiet { peak: speech_peak });
@@ -462,6 +538,48 @@ mod tests {
     /// Long enough that the brief-and-faint rule never fires. Most of these
     /// tests are about the other rules and should not have to care.
     const SAID: Duration = Duration::from_secs(9);
+
+    /// The real line, from the session that produced this filter. Nothing was
+    /// said and nothing was playing.
+    const LOOP: &str = "I'm not sure what to say. I'm not sure what to say. I'm not \
+        sure what to say. I'm not sure what to say. I'm not sure what to say.";
+
+    #[test]
+    fn a_decoder_looping_on_silence_is_rejected() {
+        assert!(is_looping(LOOP));
+        assert_eq!(
+            judge(&spoken(LOOP, 0.0, 0.9), 0.5, SAID),
+            Some(Rejected::Looping),
+            "a loop that clears every level and confidence floor still got through"
+        );
+    }
+
+    /// The point of the filter is what it does *not* catch. Every line here is
+    /// real speech from a real transcript on this machine.
+    #[test]
+    fn ordinary_repetition_is_not_a_loop() {
+        for line in [
+            "Yeah, yeah, yeah.",
+            "No. No. No.",
+            "Good day, good day.",
+            "Okay. Okay. Very good. Very good. So yeah, Aaron is going to be our onboarding buddy.",
+            "Glad to hear. Glad to hear. Yes. Very good. Very good. Thank you.",
+            "I think we should shard by tenant. A bigger box only buys six weeks.",
+        ] {
+            assert!(!is_looping(line), "treated real speech as a loop: {line:?}");
+        }
+    }
+
+    /// Three is emphasis, four is a loop. The boundary is the whole design, so
+    /// it is asserted rather than left to the constant.
+    #[test]
+    fn three_repeats_survive_and_four_do_not() {
+        let clause = "the counters drift under load";
+        let three = format!("{clause}. {clause}. {clause}.");
+        let four = format!("{clause}. {clause}. {clause}. {clause}.");
+        assert!(!is_looping(&three), "three repeats should survive");
+        assert!(is_looping(&four), "four repeats should not");
+    }
 
     /// The vocabulary from the session that produced the bug.
     const PRIMED: &str = "Likely terms: linked list, binary tree, hash map, \

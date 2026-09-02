@@ -703,7 +703,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
             None,
             brief,
             levels,
-            args.vocab.clone(),
+            resolve_vocab(args.vocab.as_deref()),
             epoch,
             notes_at_the_end,
             args.mic_path,
@@ -740,7 +740,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         args.device.clone(),
         args.model,
         args.seconds,
-        args.vocab.clone(),
+        resolve_vocab(args.vocab.as_deref()),
         args.mic_path,
         !args.no_echo_gate,
     );
@@ -869,6 +869,46 @@ fn expand_vocab(vocab: &str) -> String {
         return jay_stt::whisper::INTERVIEW_VOCABULARY.to_string();
     }
     vocab.to_string()
+}
+
+/// Where a standing vocabulary lives when none is given on the command line.
+fn default_vocab_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("jay")
+            .join("vocab")
+    })
+}
+
+/// The vocabulary for this session: the flag if given, otherwise the file.
+///
+/// `--vocab` is the difference between `Patroni` and `Petrino`, and between
+/// "reverse a singly linked list" and "reverse the link please" — both real
+/// transcripts of the same sentence. It is also a flag nobody types at the
+/// start of a call they are already two minutes late for, which makes it a
+/// feature that works in testing and not in life.
+///
+/// So the names and jargon that come up every week live in a file instead, and
+/// only the ones peculiar to today's meeting need typing. Comments and blank
+/// lines are allowed, because a list nobody can annotate is a list nobody
+/// maintains.
+fn resolve_vocab(flag: Option<&str>) -> Option<String> {
+    if let Some(vocab) = flag {
+        return Some(vocab.to_string());
+    }
+    let path = default_vocab_path()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let words: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    tracing::info!(path = %path.display(), "primed from the standing vocabulary");
+    Some(words.join(", "))
 }
 
 /// The closing line of a session.
@@ -1328,13 +1368,13 @@ fn run_pipeline(
     // function returns, because of the deadlock described at the join below.
     finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-    let mut whisper = Whisper::load(model).context("loading whisper model")?;
-    if let Some(vocab) = &vocab {
-        // Commas are how a person writes a word list; whisper wants prose.
-        whisper.prime(&expand_vocab(vocab).replace(',', " "));
-    }
-
-    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(512);
+    // The frame channel is deep enough to hold the whole model load.
+    //
+    // 4096 frames is about 65 seconds per channel at 32 ms a frame, and costs
+    // 8 MB against the 1.5 GB `medium.en` is about to take, so the arithmetic
+    // is not close. It has to cover the load because the captures are opened
+    // *first* now — see below.
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(4096);
     let (utterance_tx, utterance_rx) = crossbeam_channel::bounded::<Utterance>(16);
 
     // Both captures feed the one frame channel; the channel tag on each frame
@@ -1372,9 +1412,28 @@ fn run_pipeline(
 
     // Zero on the session clock: the first instant anything could be heard.
     // Set here, after the captures are open and before any line is sent, so
-    // every stamp in the archive is measured from the same moment and the
-    // several seconds spent loading `medium.en` are not counted as silence.
+    // every stamp in the archive is measured from the same moment.
     let epoch = *epoch.get_or_init(Instant::now);
+
+    // The model loads *after* the microphone is open, and this is the whole
+    // point of the ordering.
+    //
+    // It used to load first, which meant the devices were not merely unread
+    // during those seconds, they were not open: the audio did not exist to be
+    // lost. A sentence spoken before the panel was ready never reached the
+    // transcript at all, and the standing advice was to start jay a minute
+    // early — exactly the sort of rule nobody remembers when a call is already
+    // starting.
+    //
+    // Frames pile up in the channel above while this runs and are segmented in
+    // one burst afterwards. Nothing downstream notices: every stamp comes from
+    // `frame.captured_at`, so the backlog is timestamped from when it was
+    // heard rather than from when it was finally read.
+    let mut whisper = Whisper::load(model).context("loading whisper model")?;
+    if let Some(vocab) = &vocab {
+        // Commas are how a person writes a word list; whisper wants prose.
+        whisper.prime(&expand_vocab(vocab).replace(',', " "));
+    }
 
     // Say which devices this session is actually on, in the panel and in the
     // archive, before anything else happens.

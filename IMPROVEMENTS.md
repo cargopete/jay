@@ -119,6 +119,20 @@ decode the backlog once it is ready. Costs a few seconds of memory and removes
 the "start it a minute early or lose the opening" rule, which is exactly the
 kind of rule nobody remembers under pressure.
 
+**Fixed.** `Whisper::load` now runs *after* the captures are open rather than
+before, and the frame channel went from 512 to 4096 slots — about 65 seconds a
+channel, 8 MB, against the 1.5 GB the model is about to take. Frames pile up
+during the load and are segmented in one burst afterwards; nothing downstream
+notices, because every stamp comes from `frame.captured_at` rather than from
+when the frame was read.
+
+It was worse than "lost", incidentally. The devices were not open at all during
+the load, so the audio never existed to be lost.
+
+Verified: a sentence spoken at the instant of launch now lands at `[00:00]`.
+About the first second is still missing while the tap itself starts, which is a
+much smaller hole and a separate one.
+
 ### 6. A mute hotkey
 
 Already on the README's list. It is now the top item rather than the fourth,
@@ -156,17 +170,21 @@ the start of a call they are already late for.
 Ideas, cheapest first: a `~/.config/jay/vocab` read by default; a `--vocab-file`
 flag; pulling attendee names off the calendar event that is running now.
 
+**Done, the cheap half.** `~/.config/jay/vocab` is read whenever `--vocab` is
+absent: one term per line, `#` comments and blank lines ignored. The standing
+names live there and only today's peculiar ones need typing.
+
+Pulling attendees off the running calendar event is still the version that would
+actually be used, and it is also the thing that would make item 7 tractable,
+since a roster is exactly what contextual attribution needs.
+
 ---
 
 ## Unverified
 
 Ideas without evidence behind them yet. Move them up when a session earns it.
 
-- Fabricated `you:` lines in a real room. This session produced
-  `[01:32–01:33] you: Skitty? Why is kitty...` with nothing dictating at the
-  time. **Needs confirming with Chief whether that was actually said.** If it
-  was not, it is the first fabricated line observed on this machine and belongs
-  above rather than here.
+- ~~Fabricated `you:` lines in a real room.~~ **Confirmed, moved to item 15.**
 - Resident memory read 304 MB during this session against 1.87 GB documented in
   the README. Either the figure has moved or the model is mapped rather than
   resident. Not a problem either way, but the README should not be quoting a
@@ -238,6 +256,46 @@ correctly, so the list is working; these were simply not on it.
 ### Still open from the test session
 
 The `Skitty? Why is kitty...` line remains unconfirmed.
+
+---
+
+### 15. Whisper still invents sentences in a quiet room
+
+Confirmed on this machine, in a run where nothing was being said and nothing was
+playing:
+
+```
+[00:29–00:38] you: I'm not sure what to say. I'm not sure what to say. I'm not
+                   sure what to say. I'm not sure what to say. I'm not sure what
+                   to say.
+[00:38–00:41] you: I'm gonna say sucho. Now I'm gonna say such.
+```
+
+Five repetitions of a sentence nobody uttered. The earlier `Skitty? Why is
+kitty...` was ambiguous; this is not.
+
+The VAD is what should have stopped it, and did not: something in the room
+crossed `SPEECH_THRESHOLD` and whisper, handed a stretch of near-silence it had
+agreed was speech, reached for the most fluent thing it knew. The existing
+defences — the artefact phrase list, the level floor, the mean-probability
+floor — are all aimed at *what came back*, and this got through all three.
+
+The tell that none of them use is **repetition**. A line that says the same
+clause five times is not a sentence a person said; it is a decoder looping. That
+is cheap to detect and specific enough not to catch real speech, since people
+repeat words but not whole clauses verbatim five times running.
+
+**Fixed.** `jay_stt::is_looping`, a sixth `Rejected` variant, checked before the
+level and confidence floors because a loop clears both. Splits on sentence
+punctuation rather than words, since the unit that loops is the clause, and
+allows three consecutive repeats before rejecting.
+
+Three, not two, and the negative test is the important one: `"Yeah, yeah,
+yeah."`, `"Good day, good day."` and `"Glad to hear. Glad to hear. Yes. Very
+good. Very good."` are all real lines from real transcripts on this machine, and
+all three survive. Clauses under twelve characters are ignored entirely, because
+"Ah. Ah. Ah. Ah." is a person reacting and binning it would be editing the
+meeting rather than transcribing it.
 
 ---
 
