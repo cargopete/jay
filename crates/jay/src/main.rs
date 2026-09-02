@@ -40,6 +40,22 @@ enum Source {
     Both,
 }
 
+/// Which microphone path to open.
+///
+/// Exists to make the echo question measurable rather than arguable. The room
+/// coming back through the microphone is not a cosmetic fault: it holds the
+/// segmenter permanently in speech, so utterances run to the 25-second cap and
+/// are cut mid-sentence with both speakers inside them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum MicPath {
+    /// cpal, straight off the device. Hears the room.
+    Plain,
+    /// The platform voice unit, echo cancellation on.
+    Aec,
+    /// The same unit with cancellation off, so the two differ only in that.
+    Bypass,
+}
+
 impl Source {
     fn uses_mic(self) -> bool {
         matches!(self, Source::Mic | Source::Both)
@@ -104,6 +120,14 @@ enum Command {
         /// the terminal and takes stdout with it.
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+        /// Which microphone path to open.
+        ///
+        /// `plain` is cpal, which hears the room. `aec` is the platform voice
+        /// unit with echo cancellation on. `bypass` is the same unit with it
+        /// off, so the difference between the last two is the cancellation and
+        /// nothing else.
+        #[arg(long, value_enum, default_value_t = MicPath::Plain)]
+        mic_path: MicPath,
     },
     /// Ask jay for help with one question, without the audio pipeline.
     ///
@@ -318,6 +342,29 @@ struct TranscribeArgs {
     ///
     /// Notes are on by default and are the only thing a bare `jay` spends
     /// anything on. Skipped anyway when nothing was heard.
+    /// Which microphone path to open.
+    ///
+    /// `plain` is cpal, which hears the room and everything in it. `aec` opens
+    /// the platform voice unit instead, which cancels what the speakers are
+    /// playing — and takes the `them` channel with it, so it is a measurement
+    /// tool rather than a setting. See IMPROVEMENTS.md.
+    #[arg(long, value_enum, default_value_t = MicPath::Plain)]
+    mic_path: MicPath,
+
+    /// Transcribe the microphone even while the far side is speaking.
+    ///
+    /// The gate is on by default because the failure it prevents is silent and
+    /// the one it causes is visible. Without headphones the speakers arrive at
+    /// the microphone louder than speech does, the segmenter never falls
+    /// silent, and utterances run to the 25-second cap holding both people's
+    /// words — attributed to you. With the gate, an interjection made while
+    /// the other person is talking is not transcribed at all.
+    ///
+    /// Turn it off when wearing headphones, where there is no echo to gate and
+    /// talking over each other is just conversation.
+    #[arg(long)]
+    no_echo_gate: bool,
+
     #[arg(long)]
     no_notes: bool,
     /// Which model writes the notes.
@@ -427,7 +474,8 @@ fn run() -> Result<()> {
             device,
             seconds,
             out,
-        } => listen(source, device.as_deref(), seconds, out.as_deref()),
+            mic_path,
+        } => listen(source, device.as_deref(), seconds, out.as_deref(), mic_path),
         Command::Transcribe(args) => {
             let brief = match &args.brief {
                 Some(path) => Some(
@@ -658,6 +706,9 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
             args.vocab.clone(),
             epoch,
             notes_at_the_end,
+            args.mic_path,
+            !args.no_echo_gate,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         let written = saver.and_then(|handle| handle.join().ok());
         let _ = printer.join();
@@ -677,18 +728,27 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
     let levels = std::sync::Arc::new(jay_audio::Levels::default());
     levels.mic.set_muted(args.muted);
 
+    // Raised when the pipeline stops without being asked — the clock ran out,
+    // or the capture died. The panel watches it and closes itself, because the
+    // notes are written after `jay_ui::run` returns and a window nobody closes
+    // is a session whose notes are never written.
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // The whole pipeline moves to a background thread: on macOS the windowing
     // event loop insists on the main thread and will not negotiate.
-    let (device, model, seconds, vocab) = (
+    let (device, model, seconds, vocab, mic_path, echo_gate) = (
         args.device.clone(),
         args.model,
         args.seconds,
         args.vocab.clone(),
+        args.mic_path,
+        !args.no_echo_gate,
     );
     let pipeline = std::thread::Builder::new()
         .name("jay-pipeline".into())
         .spawn({
             let levels = std::sync::Arc::clone(&levels);
+            let finished = std::sync::Arc::clone(&finished);
             // Kept back so a dying pipeline can still reach the panel. This
             // used to log and nothing more, and the app bundle has no terminal
             // to log to, so the failure mode was a panel that sat there
@@ -708,12 +768,18 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
                     vocab,
                     epoch,
                     notes_at_the_end,
+                    mic_path,
+                    echo_gate,
+                    std::sync::Arc::clone(&finished),
                 ) {
                     tracing::error!(%e, "capture pipeline stopped");
                     let _ = complaints.send(jay_ui::Line::notice(format!(
                         "capture stopped: {e}. Nothing more will be heard this session."
                     )));
                 }
+                // A pipeline that died before reaching its own flag still has
+                // to release the panel, or the failure is a hang.
+                finished.store(true, Relaxed);
             }
         })
         .context("spawning the capture pipeline")?;
@@ -725,6 +791,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         assist.mode,
         jay_agent::Depth::default(),
         levels,
+        std::sync::Arc::clone(&finished),
         [source.uses_mic(), source.uses_system()],
     )
     .map_err(|e| anyhow::anyhow!("overlay: {e}"));
@@ -1254,6 +1321,12 @@ fn run_pipeline(
     vocab: Option<String>,
     epoch: SessionClock,
     notes_at_the_end: bool,
+    mic_path: MicPath,
+    echo_gate: bool,
+    // Raised the moment the transcript is complete, so the panel can close
+    // itself. It has to be raised from *inside* here rather than after this
+    // function returns, because of the deadlock described at the join below.
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     let mut whisper = Whisper::load(model).context("loading whisper model")?;
     if let Some(vocab) = &vocab {
@@ -1266,11 +1339,25 @@ fn run_pipeline(
 
     // Both captures feed the one frame channel; the channel tag on each frame
     // is what keeps the two speakers apart downstream.
-    let _mic = if source.uses_mic() {
-        Some(mic::start(device, frame_tx.clone()).context("starting microphone capture")?)
-    } else {
-        None
-    };
+    // Only one of these is ever `Some`. Which one decides whether the room
+    // comes with it.
+    let mut _mic = None;
+    let mut _voice_mic = None;
+    if source.uses_mic() {
+        match mic_path {
+            MicPath::Plain => {
+                _mic = Some(
+                    mic::start(device, frame_tx.clone()).context("starting microphone capture")?,
+                );
+            }
+            MicPath::Aec | MicPath::Bypass => {
+                _voice_mic = Some(
+                    jay_audio::voice_mic::start(frame_tx.clone(), mic_path == MicPath::Bypass)
+                        .context("starting the voice-processing microphone")?,
+                );
+            }
+        }
+    }
 
     let _system = if source.uses_system() {
         Some(jay_audio::system::start(frame_tx.clone()).context(
@@ -1694,6 +1781,8 @@ fn run_pipeline(
     // words, once, after long enough that a genuine pause cannot trigger it.
     let mut system_frames = 0u64;
     let mut warned_about_one_channel = false;
+    let mut gated_frames = 0u64;
+    let mut warned_about_the_gate = false;
     const LONELY_MIC_AFTER: Duration = Duration::from_secs(45);
 
     println!(
@@ -1771,6 +1860,25 @@ fn run_pipeline(
             system_frames += 1;
         }
 
+        // Read before the mutable borrow below, and only ever applied to the
+        // microphone: the far side arrives down a wire and has no room to
+        // cross, so there is nothing on that channel to gate.
+        let gated = echo_gate
+            && frame.channel == Channel::Mic
+            && system_segmenter.is_speaking();
+        if gated {
+            gated_frames += 1;
+            if !warned_about_the_gate {
+                warned_about_the_gate = true;
+                let _ = notices.send(jay_ui::Line::notice(
+                    "holding the microphone shut while the other side speaks, so the \
+                     room does not come back as you. Anything you say over them will \
+                     not be transcribed. --no-echo-gate if you are on headphones."
+                        .to_string(),
+                ));
+            }
+        }
+
         let segmenter = match frame.channel {
             Channel::Mic => &mut mic_segmenter,
             Channel::System => &mut system_segmenter,
@@ -1800,7 +1908,7 @@ fn run_pipeline(
         }
         *was_muted = false;
 
-        let utterance = segmenter.push(&frame);
+        let utterance = segmenter.push_gated(&frame, gated);
         meter.set_speaking(segmenter.is_speaking());
 
         // A press asks for whatever is mid-sentence, now, rather than after
@@ -1847,6 +1955,18 @@ fn run_pipeline(
     }
     drop(utterance_tx);
     let _ = worker.join();
+
+    // Here, and not one line later. The transcript is complete — the segmenters
+    // are flushed and the decoder has drained — so the panel has everything it
+    // will ever be shown and can close.
+    //
+    // It must be raised before the join below or the two wait on each other
+    // forever. The assistant thread blocks on the request channel, whose sender
+    // lives in the panel; the panel closes when this flag is raised; and this
+    // function was raising it only on the way out. A 60-second session sat
+    // there for three minutes with a finished transcript and no notes.
+    finished.store(true, Relaxed);
+
     if let Some(handle) = assistant {
         // Drop our sender *before* joining. The assistant's loop ends when the
         // question channel closes, and this scope holds one of the senders —
@@ -1860,6 +1980,21 @@ fn run_pipeline(
         println!(
             "\n{skipped_utterances} utterance(s) skipped: transcription could not keep up"
         );
+    }
+    // Said in the archive as well as the terminal, because the gate removes
+    // speech and a mechanism that removes speech must leave a mark. A session
+    // that quietly dropped half of one side is exactly the failure jay exists
+    // to avoid.
+    if gated_frames > 0 {
+        let held = Duration::from_secs_f64(
+            gated_frames as f64 * jay_audio::FRAME_DURATION.as_secs_f64(),
+        );
+        let _ = notices.send(jay_ui::Line::notice(format!(
+            "the echo gate held the microphone shut for {:.0}s in total, while the \
+             other side was speaking.",
+            held.as_secs_f64()
+        )));
+        println!("\necho gate held the microphone for {:.0}s", held.as_secs_f64());
     }
     if let Some(capture) = &_mic {
         println!("\nmic dropped samples: {}", capture.dropped_samples());
@@ -2020,6 +2155,8 @@ fn demo(state: &str) -> Result<()> {
             jay_agent::Mode::Coding,
             jay_agent::Depth::default(),
             levels,
+            // Nothing behind a demo panel can finish, so it closes only by hand.
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             [true, true],
         )
         .map_err(|e| anyhow::anyhow!("overlay: {e}"));
@@ -2091,6 +2228,8 @@ fn demo(state: &str) -> Result<()> {
         jay_agent::Mode::Coding,
         jay_agent::Depth::default(),
         levels,
+        // Nothing behind a demo panel can finish, so it closes only by hand.
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         [true, true],
     )
     .map_err(|e| anyhow::anyhow!("overlay: {e}"))
@@ -2360,14 +2499,29 @@ fn listen(
     device: Option<&str>,
     seconds: u64,
     out: Option<&std::path::Path>,
+    mic_path: MicPath,
 ) -> Result<()> {
     let (tx, rx) = crossbeam_channel::bounded::<Frame>(512);
 
-    let mic_capture = if source.uses_mic() {
-        Some(mic::start(device, tx.clone()).context("starting microphone capture")?)
-    } else {
-        None
-    };
+    // Only one of these is ever `Some`. Two bindings rather than an enum
+    // because each capture type stops itself on drop and the borrow checker is
+    // happier watching two of them than one boxed trait object.
+    let mut mic_capture = None;
+    let mut voice_capture = None;
+    if source.uses_mic() {
+        match mic_path {
+            MicPath::Plain => {
+                mic_capture =
+                    Some(mic::start(device, tx.clone()).context("starting microphone capture")?);
+            }
+            MicPath::Aec | MicPath::Bypass => {
+                voice_capture = Some(
+                    jay_audio::voice_mic::start(tx.clone(), mic_path == MicPath::Bypass)
+                        .context("starting the voice-processing microphone")?,
+                );
+            }
+        }
+    }
     let system_capture = if source.uses_system() {
         Some(jay_audio::system::start(tx.clone()).context("starting the system audio tap")?)
     } else {
@@ -2403,7 +2557,8 @@ fn listen(
     // Once per channel. Counting frames across both while expecting one
     // channel's worth made a perfectly healthy `--source both` run report a 75%
     // over-delivery, which reads as a fault rather than as arithmetic.
-    let channels = u64::from(mic_capture.is_some()) + u64::from(system_capture.is_some());
+    let channels = u64::from(mic_capture.is_some() || voice_capture.is_some())
+        + u64::from(system_capture.is_some());
     let expected =
         channels * seconds * u64::from(SAMPLE_RATE) / jay_audio::FRAME_SAMPLES as u64;
     println!();
@@ -2411,6 +2566,13 @@ fn listen(
     println!("peak rms         : {peak_rms:.5}");
     println!("worst queue lag  : {worst_lag:?}");
     if let Some(capture) = &mic_capture {
+        println!("mic dropped      : {}", capture.dropped_samples());
+    }
+    if let Some(capture) = &voice_capture {
+        println!(
+            "mic path         : voice unit, cancellation {}",
+            if mic_path == MicPath::Bypass { "off" } else { "on" }
+        );
         println!("mic dropped      : {}", capture.dropped_samples());
     }
     if let Some(capture) = &system_capture {

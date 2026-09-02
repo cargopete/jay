@@ -234,6 +234,8 @@ jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--save` | Override where the session is archived. |
 | `--model` | `tiny`, `base`, `small`, `medium`, `turbo`. Default `medium`. |
 | `--vocab` | Extra words to expect, comma separated. Nothing is primed unless you ask. `--vocab interview` loads the built-in algorithms list. |
+| `--no-echo-gate` | Transcribe your microphone even while the other side is speaking. Off the gate goes; wear headphones. |
+| `--mic-path` | `plain`, `aec`, `bypass`. A measurement tool, not a setting — `aec` loses the `them` channel. |
 | `--no-notes` | Do not write the meeting notes when the session ends. |
 | `--notes-model` | Which model writes them. Default `claude-sonnet-5`. |
 
@@ -517,6 +519,45 @@ mid-sentence discards whatever the VAD was holding rather than emitting it on
 unmute.
 
 `--muted` starts that way, for sitting in on something you are not speaking in.
+
+### The echo gate
+
+**While the other side is speaking, your microphone is not transcribed.** On by
+default, `--no-echo-gate` to turn it off.
+
+This is a blunt instrument and it is there because the subtle one does not work.
+Without headphones the speakers arrive at the microphone *louder than speech
+does* — 0.0408 RMS against a speech level of about 0.02, measured on a real
+call. The segmenter therefore never falls silent, never reaches its exit
+condition, and runs to the 25-second cap in `vad.rs`, cutting mid-sentence with
+both people's words inside the same utterance. Nineteen of fifty-five microphone
+utterances went that way in one 19-minute meeting, and twenty-seven of the
+fifty-five began on a lowercase word, which is what that looks like from the
+outside.
+
+The text-side echo guard cannot repair it. It compares a microphone line against
+a system line expecting two copies of one sentence, and once the segmenters
+disagree about where sentences are there is nothing left to match — the two
+channels' start times differed by nine to sixteen seconds against a two-second
+window.
+
+So the gate works upstream instead: while the `them` channel is mid-utterance,
+frames on the `you` channel are fed to the detector but cannot open an utterance
+or keep one open. The cost is real and one-sided. **Speak over the other person
+and you are not transcribed at all.** That is worse than a proper echo canceller
+and better than what it replaces, where the same words survived inside a
+25-second block attributed to the wrong person. It says so in the panel the
+first time it fires, and reports its total when the session ends, because a
+mechanism that removes speech should not do it quietly.
+
+Turn it off with headphones on. There is no echo to gate, and talking over each
+other is then just a conversation.
+
+> The platform's own echo canceller was tried first and rejected. It works, and
+> it takes the `them` channel with it: `VoiceProcessingIO` puts the output
+> device into a mode a CoreAudio process tap cannot see through, so the far side
+> vanishes entirely. The code is kept behind `--mic-path aec` so the measurement
+> can be repeated. See [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 ---
 

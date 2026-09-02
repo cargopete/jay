@@ -18,6 +18,8 @@ pub mod vad;
 pub mod screen;
 #[cfg(target_os = "macos")]
 pub mod system;
+#[cfg(target_os = "macos")]
+pub mod voice_mic;
 
 /// Sample rate every source resamples to before leaving this crate.
 pub const SAMPLE_RATE: u32 = 16_000;

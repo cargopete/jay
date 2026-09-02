@@ -126,11 +126,35 @@ impl SpeechSegmenter {
 
     /// Feed one frame. Returns an utterance when one has just ended.
     pub fn push(&mut self, frame: &Frame) -> Option<Utterance> {
+        self.push_gated(frame, false)
+    }
+
+    /// Feed one frame, optionally holding this channel shut.
+    ///
+    /// `gated` says the *other* channel is mid-utterance, which on a call taken
+    /// without headphones means everything arriving here is the far side coming
+    /// back off the speakers. Left ungated, that is not merely a duplicate
+    /// line: the microphone never falls silent, so [`EXIT_FRAMES`] is never
+    /// reached, and utterances run to [`MAX_UTTERANCE`] and are cut at 25
+    /// seconds with both people's words inside them. Nineteen of fifty-five, in
+    /// one real meeting.
+    ///
+    /// A gated frame is still fed to the VAD, because the detector is recurrent
+    /// and skipping frames would corrupt the state it carries. It simply cannot
+    /// open an utterance, and counts as silence towards closing one already
+    /// open — which is what lets a sentence interrupted by the far side end
+    /// cleanly rather than absorbing them.
+    ///
+    /// The cost is honest and one-sided: speak while the other person is
+    /// speaking and you are not transcribed. That is worse than a perfect
+    /// echo canceller and better than what it replaces, where the same words
+    /// survive inside a 25-second block attributed to the wrong person.
+    pub fn push_gated(&mut self, frame: &Frame, gated: bool) -> Option<Utterance> {
         debug_assert_eq!(frame.channel, self.channel);
         debug_assert_eq!(frame.samples.len(), FRAME_SAMPLES);
 
         let probability = self.vad.predict(frame.samples.iter().copied());
-        let is_speech = probability >= SPEECH_THRESHOLD;
+        let is_speech = probability >= SPEECH_THRESHOLD && !gated;
 
         // Track the peak over speech frames only, so the level survives the
         // pre-roll and trailing silence that bracket every utterance.
@@ -248,6 +272,88 @@ mod tests {
         }
         assert!(!seg.is_speaking());
         assert!(seg.flush().is_none());
+    }
+
+    /// 3.36 seconds of real speech at 16 kHz mono, signed 16-bit little-endian
+    /// and headerless. Synthesised with `say` rather than recorded, so it can
+    /// live in the repository without anybody's voice in it, and it is the only
+    /// input here that Silero actually calls speech. Every test below that
+    /// claims something about an utterance needs one.
+    const SPEECH: &[u8] = include_bytes!("../testdata/speech-16k-mono.pcm");
+
+    fn speech_frames() -> Vec<Vec<f32>> {
+        let samples: Vec<f32> = SPEECH
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| i16::from_le_bytes(pair) as f32 / 32768.0)
+            .collect();
+        samples
+            .as_chunks::<FRAME_SAMPLES>()
+            .0
+            .iter()
+            .map(|chunk| chunk.to_vec())
+            .collect()
+    }
+
+    /// The fixture is only useful if the detector agrees it is speech. Asserted
+    /// on its own so that a failure here reads as "the fixture or the detector
+    /// moved" rather than being blamed on whatever the gate did.
+    #[test]
+    fn the_speech_fixture_is_heard_as_speech() {
+        let mut seg = SpeechSegmenter::new(Channel::Mic).unwrap();
+        let mut utterances = 0;
+        for samples in speech_frames() {
+            if seg.push(&frame(samples)).is_some() {
+                utterances += 1;
+            }
+        }
+        utterances += usize::from(seg.flush().is_some());
+        assert!(utterances > 0, "the speech fixture never opened an utterance");
+    }
+
+    /// The echo gate. Without headphones the far side arrives at the microphone
+    /// louder than speech, and an ungated segmenter never falls silent: it runs
+    /// to `MAX_UTTERANCE` and cuts at 25 seconds with both people inside.
+    #[test]
+    fn a_gated_channel_never_opens_an_utterance() {
+        let mut seg = SpeechSegmenter::new(Channel::Mic).unwrap();
+        for samples in speech_frames() {
+            assert!(
+                seg.push_gated(&frame(samples), true).is_none(),
+                "the gate let an utterance through"
+            );
+            assert!(!seg.is_speaking(), "the gate let the segmenter open");
+        }
+        assert!(seg.flush().is_none(), "the gate left an utterance behind");
+    }
+
+    /// Closing matters as much as not opening. A sentence already in progress
+    /// when the other person starts talking has to end, rather than absorbing
+    /// them and running on to the cap.
+    #[test]
+    fn gating_closes_an_utterance_already_open() {
+        let frames = speech_frames();
+        let mut seg = SpeechSegmenter::new(Channel::Mic).unwrap();
+
+        // Open one for real on the first half of the fixture.
+        let half = frames.len() / 2;
+        for samples in frames.iter().take(half) {
+            seg.push(&frame(samples.clone()));
+        }
+        assert!(seg.is_speaking(), "the fixture did not open an utterance");
+
+        // Now the far side starts. The gate counts as silence, so the utterance
+        // closes on the normal hangover rather than running on.
+        let mut closed = false;
+        for samples in frames.iter().skip(half) {
+            if seg.push_gated(&frame(samples.clone()), true).is_some() {
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed, "gating never closed the open utterance");
+        assert!(!seg.is_speaking());
     }
 
     #[test]

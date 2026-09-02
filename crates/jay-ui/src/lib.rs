@@ -170,6 +170,9 @@ pub enum Request {
 }
 
 /// Run the overlay. Blocks until the window is closed.
+// Nine things the panel cannot work out for itself, and a struct would move the
+// list somewhere else rather than shorten it. See the note on `Overlay::new`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     rx: Receiver<Line>,
     requests: crossbeam_channel::Sender<Request>,
@@ -177,6 +180,13 @@ pub fn run(
     mode: jay_agent::Mode,
     depth: jay_agent::Depth,
     levels: std::sync::Arc<jay_audio::Levels>,
+    // Set by the pipeline when it stops on its own — the clock ran out, or the
+    // capture died. Without it a timed session leaves the panel sitting there
+    // looking like it is still recording, and because the notes are only
+    // written after this function returns, they are never written at all. A
+    // 120-second session was observed still holding the window four minutes
+    // later with its transcript complete and no notes beside it.
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // `expected` is which channels the session asked for, as `[mic, system]`.
     // Without it the panel cannot tell a channel that was never switched on
     // from one that was switched on and is delivering nothing, and those are
@@ -200,7 +210,7 @@ pub fn run(
         options,
         Box::new(move |cc| {
             Ok(Box::new(Overlay::new(
-                cc, rx, requests, model_name, mode, depth, levels, expected,
+                cc, rx, requests, model_name, mode, depth, levels, finished, expected,
             )))
         }),
     )
@@ -255,6 +265,9 @@ struct Overlay {
     levels: std::sync::Arc<jay_audio::Levels>,
     /// Which channels this session asked for, as `[mic, system]`.
     expected: [bool; 2],
+    /// Set by the pipeline when it stops on its own. Closes the window, which
+    /// is what releases the notes.
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Displayed needle position per channel, and the frame count it was taken
     /// at. Held so the meter can fall smoothly rather than flickering at the
     /// frame rate, and so a stalled stream can be told from a silent one.
@@ -262,10 +275,11 @@ struct Overlay {
 }
 
 impl Overlay {
-    // Eight arguments, and each is a distinct thing the panel cannot work out
+    // Nine arguments, and each is a distinct thing the panel cannot work out
     // for itself: what to draw, where to send presses, which model, which
-    // switch positions, the live levels, and which channels were asked for. A
-    // struct would move the list somewhere else without shortening it.
+    // switch positions, the live levels, whether the pipeline has stopped, and
+    // which channels were asked for. A struct would move the list somewhere
+    // else without shortening it.
     #[allow(clippy::too_many_arguments)]
     fn new(
         cc: &eframe::CreationContext<'_>,
@@ -275,6 +289,7 @@ impl Overlay {
         mode: jay_agent::Mode,
         depth: jay_agent::Depth,
         levels: std::sync::Arc<jay_audio::Levels>,
+        finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
         expected: [bool; 2],
     ) -> Self {
         // Dark, translucent, and low contrast enough to sit over a terminal
@@ -310,6 +325,7 @@ impl Overlay {
             expanded: false,
             levels,
             expected,
+            finished,
             shown: [(0.0, 0); 2],
         }
     }
@@ -823,6 +839,13 @@ impl eframe::App for Overlay {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Checked before anything is drawn. The pipeline has stopped and the
+        // notes are waiting on this function returning, so there is nothing to
+        // be gained by holding the window open for one more frame.
+        if self.finished.load(std::sync::atomic::Ordering::Relaxed) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         for line in self.rx.try_iter() {
             // A partial replaces the one before it and is never retained: the
             // finished suggestion is the thing that goes in the transcript.
@@ -902,6 +925,24 @@ impl eframe::App for Overlay {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    // Minimise, because the only way to get the panel out of
+                    // the way used to be to end the recording. The window is
+                    // undecorated, so there is no system chrome to borrow one
+                    // from and it has to be drawn here.
+                    //
+                    // Deliberately not labelled with anything that reads as
+                    // stopping: the session goes on recording while it is
+                    // minimised, and a control that looks like a stop button
+                    // but is not is worse than no control at all.
+                    if ui
+                        .small_button("–")
+                        .on_hover_text("hide the panel; the session keeps recording")
+                        .clicked()
+                    {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
 
                     match self.waiting_since {
