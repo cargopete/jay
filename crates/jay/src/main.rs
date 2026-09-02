@@ -1477,7 +1477,28 @@ fn run_pipeline(
             .spawn(move || {
                 let mut mode = settings_mode;
                 let mut depth = jay_agent::Depth::default();
-                for request in rx {
+                // Polled rather than blocked on, and the difference is the
+                // whole session shutting down cleanly.
+                //
+                // `for request in rx` ends only when the panel drops its
+                // sender, and eframe does not reliably drop the app struct on
+                // macOS when `run_native` returns under an `.app` bundle. That
+                // left this thread parked forever holding a clone of the
+                // question channel, which the assistant thread waits on, which
+                // `run_pipeline` joins, which `main` joins. A 25-second session
+                // sat there for two minutes with its transcript finished, its
+                // panel already gone, and no notes written — and it only
+                // happened through the bundle, which is the only way jay is
+                // ever really launched.
+                loop {
+                    if INTERRUPTED.load(Relaxed) {
+                        break;
+                    }
+                    let request = match rx.recv_timeout(Duration::from_millis(200)) {
+                        Ok(request) => request,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    };
                     match request {
                         jay_ui::Request::SetMode(next) => {
                             mode = next;
@@ -1865,7 +1886,7 @@ fn run_pipeline(
         // cross, so there is nothing on that channel to gate.
         let gated = echo_gate
             && frame.channel == Channel::Mic
-            && system_segmenter.is_speaking();
+            && system_segmenter.is_or_becoming_speech();
         if gated {
             gated_frames += 1;
             if !warned_about_the_gate {

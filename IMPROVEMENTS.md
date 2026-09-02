@@ -32,6 +32,26 @@ Fix: when the capture loop exits of its own accord, either send
 `recording finished` in the panel. The second is better, because the transcript
 is already complete and there is no reason to make the notes wait on a mouse.
 
+**Fixed**, and it took two goes because there were two deadlocks stacked on each
+other.
+
+The panel now watches an `AtomicBool` that `run_pipeline` raises the moment the
+transcript is complete, and closes itself. The flag has to be raised from
+*inside* `run_pipeline`, before it joins the assistant thread, or the pipeline
+waits on the panel and the panel waits on the pipeline.
+
+Behind that sat a second one, and it only ever appeared through the `.app`
+bundle, which is the only way jay is really launched. The request-handling thread
+ran `for request in rx`, which ends only when the panel drops its sender — and
+eframe does not reliably drop the app struct on macOS when `run_native` returns
+under a bundle. So that thread parked forever holding a clone of the question
+channel, which the assistant waits on, which `run_pipeline` joins, which `main`
+joins. It now polls with a timeout and stops on `INTERRUPTED` instead of trusting
+a channel to close.
+
+A 25-second session through the bundle: closed itself after 39 seconds, notes
+written, nobody touched the panel.
+
 ### 2. There is no minimise button
 
 `crates/jay-ui/src/lib.rs:903` has only `×`, which closes the session outright.
@@ -346,10 +366,24 @@ whose opening words it contains:
 [00:41–00:50] them: architecture and sharing and not incure these egress costs …
 ```
 
-They are cosmetically ugly and they are cheap to remove, because they have a
-signature nothing else has: under two seconds, starting within a whisker of a
-system utterance, and made of that utterance's first words. The retraction path
-in `echo.rs` already knows how to withdraw a line it has emitted.
+**Fixed.** Not by retracting them afterwards, which could not have worked: the
+microphone's copy of half a word transcribes to something that looks nothing
+like the system's copy of the whole sentence, so there is no text to match on.
+
+The cause was one frame. Both segmenters need `ENTRY_FRAMES` before they open,
+both hear the far side's first syllable in the same frame, and which one opens
+first is decided by the order the two frames happen to come off the channel.
+`SpeechSegmenter::is_or_becoming_speech` reports `in_speech || speech_run > 0`,
+so the gate closes on the system channel's *first* speech frame rather than on
+its second. One frame of margin, and it costs a stray noise frame gating the
+other channel for 32 ms.
+
+Measured over eight dictated turns, which is eight chances to leak:
+
+| | before | after |
+| --- | --- | --- |
+| `them` lines | 10 | 10 |
+| `you` lines | one per turn | **1**, plus one `?` fragment |
 
 ### 14. Notes survive a damaged transcript better than the transcript does
 

@@ -212,6 +212,29 @@ impl SpeechSegmenter {
         self.in_speech
     }
 
+    /// Mid-utterance, *or* one speech frame into opening one.
+    ///
+    /// What the echo gate must ask, rather than [`is_speaking`](Self::is_speaking).
+    /// Both channels hear the far side's first syllable in the same 32 ms frame
+    /// and both need [`ENTRY_FRAMES`] before they will open, so which one opens
+    /// first is decided by the order the two frames happen to come off the
+    /// channel. When the microphone wins that race it opens on the echo with
+    /// the gate still down, and then holds the fragment for a full
+    /// [`EXIT_FRAMES`] hangover before letting go.
+    ///
+    /// That is not theoretical. A 44-minute call produced 52 of them, one at the
+    /// start of nearly every turn, each one or two seconds long and made of the
+    /// opening words of the `them` line directly beneath it. They cannot be
+    /// caught downstream: the microphone's copy of half a word transcribes to
+    /// something that looks nothing like the system's copy of the whole
+    /// sentence, so there is no text for the echo guard to match.
+    ///
+    /// One frame of margin is enough, and it costs a stray noise frame gating
+    /// the other channel for 32 ms.
+    pub fn is_or_becoming_speech(&self) -> bool {
+        self.in_speech || self.speech_run > 0
+    }
+
     fn open(&mut self, frame_time: Instant) {
         self.in_speech = true;
         self.silence_run = 0;
@@ -354,6 +377,31 @@ mod tests {
         }
         assert!(closed, "gating never closed the open utterance");
         assert!(!seg.is_speaking());
+    }
+
+    /// The gate has to fire a frame before the segmenter opens, or the other
+    /// channel wins the race and opens on the echo. This is the margin.
+    #[test]
+    fn becoming_speech_is_true_before_the_utterance_opens() {
+        let mut seg = SpeechSegmenter::new(Channel::Mic).unwrap();
+        assert!(!seg.is_or_becoming_speech(), "idle channel claimed speech");
+
+        let mut saw_the_gap = false;
+        for samples in speech_frames() {
+            seg.push(&frame(samples));
+            if seg.is_or_becoming_speech() && !seg.is_speaking() {
+                saw_the_gap = true;
+            }
+            if seg.is_speaking() {
+                break;
+            }
+        }
+        assert!(
+            saw_the_gap,
+            "opened without ever reporting that it was about to"
+        );
+        assert!(seg.is_speaking(), "the fixture never opened an utterance");
+        assert!(seg.is_or_becoming_speech(), "open but not reported as such");
     }
 
     #[test]
