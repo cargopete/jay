@@ -47,6 +47,37 @@ unsafe extern "C" {
     fn jay_default_output_name(buffer: *mut std::os::raw::c_char, len: usize) -> i32;
 }
 
+/// Hand a frame downstream, giving up if the capture has been told to stop.
+///
+/// A plain `send` blocks forever once the channel is full, and the channel
+/// fills the moment the pipeline stops reading it — which is exactly what
+/// happens at the end of a session, while the decoder is still working through
+/// its backlog. The capture thread then parks inside `send`, never sees `stop`,
+/// and `Drop` joins it and waits for a thread that cannot finish. A 80-second
+/// session hung on that with its transcript complete and its panel still open.
+///
+/// Returns `false` when the caller should stop: either the receiver is gone or
+/// the capture has been asked to end.
+fn send_unless_stopped(
+    tx: &Sender<Frame>,
+    frame: Frame,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let mut pending = frame;
+    loop {
+        match tx.send_timeout(pending, IDLE_POLL) {
+            Ok(()) => return true,
+            Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => {
+                if stop.load(Ordering::Relaxed) {
+                    return false;
+                }
+                pending = returned;
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => return false,
+        }
+    }
+}
+
 /// Name of the output device the tap will attach itself to.
 ///
 /// Read once, at start, exactly as the tap does — which is the point. The
@@ -208,7 +239,7 @@ pub fn start(tx: Sender<Frame>) -> Result<SystemCapture> {
                             samples,
                             captured_at,
                         };
-                        if tx.send(frame).is_err() {
+                        if !send_unless_stopped(&tx, frame, &stop) {
                             return;
                         }
                     }

@@ -52,6 +52,48 @@ a channel to close.
 A 25-second session through the bundle: closed itself after 39 seconds, notes
 written, nobody touched the panel.
 
+**And then it came back, on longer sessions, and this half is *not* fixed.**
+
+Three real deadlocks were found and removed on the way, and each is worth having
+gone regardless:
+
+1. The pipeline joined the assistant thread, which waits on a channel whose other
+   sender lives in the panel, which waits on the pipeline. The assistant is now
+   released rather than joined — a suggestion still in flight at the end of a
+   session is one nobody is going to read.
+2. The request thread ran `for request in rx`, ending only when the panel drops
+   its sender, and eframe does not reliably drop the app struct on macOS under a
+   bundle. It now polls and stops on `INTERRUPTED`.
+3. The capture threads parked inside `send` once the loop stopped draining the
+   frame channel, and `Drop` joined them. They now use `send_timeout` and check
+   their stop flag, and the captures are dropped the instant the loop ends
+   rather than when the function returns.
+
+After all three, `jay-pipeline` exits cleanly and every worker is released. What
+remains is the window itself, and it is not jay's to fix:
+
+```
+threads alive : jay-assist  jay-hand-ask  jay-save
+main thread   : _CFRunLoopRunSpecific        (idle, not drawing)
+pipeline      : gone — it finished and set the flag
+```
+
+`Closer::close` stores the flag *and* calls `request_repaint` on the panel's own
+context, and the panel still never runs another frame. macOS stops drawing an
+unattended window, and a redraw request against a window it has stopped drawing
+does not bring it back. Every one of these tests ran for minutes with nobody at
+the keyboard, which is exactly the condition that provokes it.
+
+So: **a timed session launched from the bundle still leaves its window open and
+its notes unwritten.** A session ended by closing the panel — which is how jay is
+actually used — writes them every time. `--terminal` with `--seconds` also works,
+having no window to leave open.
+
+The fix worth trying next is to stop routing the notes through the window at all:
+write them from the pipeline thread when the session ends on its own, so the
+deliverable never waits on a redraw. The ordering against the archive writer
+needs care, which is why it is written down rather than rushed in.
+
 ### 2. There is no minimise button
 
 `crates/jay-ui/src/lib.rs:903` has only `×`, which closes the session outright.

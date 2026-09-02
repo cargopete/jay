@@ -85,6 +85,37 @@ impl<P: Producer<Item = f32>> RingSink<P> {
     }
 }
 
+/// Hand a frame downstream, giving up if the capture has been told to stop.
+///
+/// A plain `send` blocks forever once the channel is full, and the channel
+/// fills the moment the pipeline stops reading it — which is exactly what
+/// happens at the end of a session, while the decoder is still working through
+/// its backlog. The capture thread then parks inside `send`, never sees `stop`,
+/// and `Drop` joins it and waits for a thread that cannot finish. A 80-second
+/// session hung on that with its transcript complete and its panel still open.
+///
+/// Returns `false` when the caller should stop: either the receiver is gone or
+/// the capture has been asked to end.
+fn send_unless_stopped(
+    tx: &Sender<Frame>,
+    frame: Frame,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let mut pending = frame;
+    loop {
+        match tx.send_timeout(pending, IDLE_POLL) {
+            Ok(()) => return true,
+            Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => {
+                if stop.load(Ordering::Relaxed) {
+                    return false;
+                }
+                pending = returned;
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => return false,
+        }
+    }
+}
+
 /// List input device names, for `--list-devices` and for config validation.
 pub fn input_devices() -> Result<Vec<String>> {
     let host = cpal::default_host();
@@ -242,8 +273,8 @@ pub fn start(device_name: Option<&str>, tx: Sender<Frame>) -> Result<Capture> {
                             samples,
                             captured_at,
                         };
-                        if tx.send(frame).is_err() {
-                            return; // consumer went away
+                        if !send_unless_stopped(&tx, frame, &stop) {
+                            return;
                         }
                     }
                 }

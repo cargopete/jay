@@ -689,6 +689,13 @@ absolute path: `open -n -a ~/Projects/jay/target/release/jay.app --args …`
 
 **The panel says nothing.** Correct, until you press the button.
 
+**A `--seconds` session finished but the panel is still there and there are no
+notes.** Known, and not fixed. The recording stopped on time and the transcript
+on disk is complete; the notes are written when the window closes, and macOS
+will not redraw an unattended window to let it close itself. Close it and they
+land. Or use `--terminal`, which has no window to leave open. Ending a session
+the normal way — closing the panel yourself — has never had this problem.
+
 **No `them:` lines.** Two possibilities. If the `them` meter reads `NO FRAMES`,
 you launched from a shell rather than through `open -n -a`, so the tap is
 unauthorised — re-run `jay check`. If it reads `QUIET`, the tap is fine and

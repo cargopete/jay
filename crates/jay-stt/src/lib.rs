@@ -112,6 +112,13 @@ pub fn is_hallucination(text: &str) -> bool {
         "transcription by",
         "subtitles by",
         "amara.org",
+        // Not a sign-off, and not from subtitles either. Whisper's training
+        // data carries a good deal of Word-generated HTML, and handed a second
+        // of nothing it will occasionally emit the schema namespace out of it.
+        // Observed verbatim on the `you` channel of a dictated test:
+        // `urn:schemas-microsoft-com:office:smarttags City urn:schemas-…`
+        // Safe anywhere in a line, since nobody has ever said it out loud.
+        "urn:schemas-microsoft-com",
     ];
 
     /// Artefacts whose words are also ordinary speech.
@@ -543,6 +550,13 @@ mod tests {
     /// said and nothing was playing.
     const LOOP: &str = "I'm not sure what to say. I'm not sure what to say. I'm not \
         sure what to say. I'm not sure what to say. I'm not sure what to say.";
+
+    #[test]
+    fn the_word_html_namespace_is_an_artefact() {
+        assert!(is_hallucination(
+            "urn:schemas-microsoft-com:office:smarttags City urn:schemas-microsoft-com:office:smarttags"
+        ));
+    }
 
     #[test]
     fn a_decoder_looping_on_silence_is_rejected() {

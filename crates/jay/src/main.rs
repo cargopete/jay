@@ -708,7 +708,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
             notes_at_the_end,
             args.mic_path,
             !args.no_echo_gate,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            jay_ui::Closer::new(),
         );
         let written = saver.and_then(|handle| handle.join().ok());
         let _ = printer.join();
@@ -732,7 +732,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
     // or the capture died. The panel watches it and closes itself, because the
     // notes are written after `jay_ui::run` returns and a window nobody closes
     // is a session whose notes are never written.
-    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = jay_ui::Closer::new();
 
     // The whole pipeline moves to a background thread: on macOS the windowing
     // event loop insists on the main thread and will not negotiate.
@@ -748,7 +748,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         .name("jay-pipeline".into())
         .spawn({
             let levels = std::sync::Arc::clone(&levels);
-            let finished = std::sync::Arc::clone(&finished);
+            let finished = finished.clone();
             // Kept back so a dying pipeline can still reach the panel. This
             // used to log and nothing more, and the app bundle has no terminal
             // to log to, so the failure mode was a panel that sat there
@@ -770,7 +770,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
                     notes_at_the_end,
                     mic_path,
                     echo_gate,
-                    std::sync::Arc::clone(&finished),
+                    finished.clone(),
                 ) {
                     tracing::error!(%e, "capture pipeline stopped");
                     let _ = complaints.send(jay_ui::Line::notice(format!(
@@ -779,7 +779,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
                 }
                 // A pipeline that died before reaching its own flag still has
                 // to release the panel, or the failure is a hang.
-                finished.store(true, Relaxed);
+                finished.close();
             }
         })
         .context("spawning the capture pipeline")?;
@@ -791,7 +791,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         assist.mode,
         jay_agent::Depth::default(),
         levels,
-        std::sync::Arc::clone(&finished),
+        finished.clone(),
         [source.uses_mic(), source.uses_system()],
     )
     .map_err(|e| anyhow::anyhow!("overlay: {e}"));
@@ -1366,7 +1366,7 @@ fn run_pipeline(
     // Raised the moment the transcript is complete, so the panel can close
     // itself. It has to be raised from *inside* here rather than after this
     // function returns, because of the deadlock described at the join below.
-    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    finished: jay_ui::Closer,
 ) -> Result<()> {
     // The frame channel is deep enough to hold the whole model load.
     //
@@ -1399,7 +1399,7 @@ fn run_pipeline(
         }
     }
 
-    let _system = if source.uses_system() {
+    let mut _system = if source.uses_system() {
         Some(jay_audio::system::start(frame_tx.clone()).context(
             "starting the system audio tap. macOS asks for permission the first \
              time; if it was refused, grant it in System Settings > Privacy & \
@@ -2026,6 +2026,32 @@ fn run_pipeline(
         }
     }
 
+    // Stop the microphone before anything else, and before the decoder is
+    // joined below.
+    //
+    // Nothing reads the frame channel once this loop has exited, so the capture
+    // threads fill it and then park inside `send`. They are joined by `Drop`,
+    // which used to run when this function returned — after the joins below —
+    // so shutdown waited on threads waiting on a channel nobody was draining.
+    // An 80-second session hung there with a finished transcript, an open panel
+    // and no notes. Dropping here raises their stop flag first, which is the
+    // half of the fix that lives outside `jay-audio`.
+    //
+    // The counters are read first, because they live on the captures and the
+    // end-of-session report is the only place a dropped sample is ever
+    // mentioned. Dropping first and reporting later would have quietly turned
+    // that line off.
+    let dropped_mic = _mic
+        .as_ref()
+        .map(mic::Capture::dropped_samples)
+        .or_else(|| _voice_mic.as_ref().map(|c| c.dropped_samples()));
+    let system_stats = _system
+        .as_ref()
+        .map(|c| (c.device_sample_rate(), c.dropped_samples()));
+    drop(_mic.take());
+    drop(_voice_mic.take());
+    drop(_system.take());
+
     // Whatever was mid-sentence when time ran out is still worth having.
     for tail in [mic_segmenter.flush(), system_segmenter.flush()]
         .into_iter()
@@ -2045,16 +2071,22 @@ fn run_pipeline(
     // lives in the panel; the panel closes when this flag is raised; and this
     // function was raising it only on the way out. A 60-second session sat
     // there for three minutes with a finished transcript and no notes.
-    finished.store(true, Relaxed);
+    finished.close();
 
-    if let Some(handle) = assistant {
-        // Drop our sender *before* joining. The assistant's loop ends when the
-        // question channel closes, and this scope holds one of the senders —
-        // joining first waits on a channel that can never close. That was a
-        // real deadlock: `transcribe --seconds 5` ran until it was killed.
-        drop(question_tx);
-        let _ = handle.join();
-    }
+    // The assistant is released, not joined.
+    //
+    // Dropping this scope's sender was once enough, on the reasoning that the
+    // assistant's loop ends when the question channel closes. It is not: the
+    // panel's request thread holds the other sender and outlives us, so joining
+    // here waits on a thread waiting on a channel held open by a window that is
+    // waiting on this function. Three-cornered, and it hung every timed session
+    // launched from the `.app` bundle.
+    //
+    // Nothing is lost by letting it go. A suggestion still in flight at the end
+    // of a session is a suggestion nobody is going to read, and the transcript
+    // and the archive — the things that matter — are already complete by here.
+    drop(question_tx);
+    drop(assistant);
 
     if skipped_utterances > 0 {
         println!(
@@ -2076,15 +2108,11 @@ fn run_pipeline(
         )));
         println!("\necho gate held the microphone for {:.0}s", held.as_secs_f64());
     }
-    if let Some(capture) = &_mic {
-        println!("\nmic dropped samples: {}", capture.dropped_samples());
+    if let Some(dropped) = dropped_mic {
+        println!("\nmic dropped samples: {dropped}");
     }
-    if let Some(capture) = &_system {
-        println!(
-            "system tap: {} Hz, dropped samples: {}",
-            capture.device_sample_rate(),
-            capture.dropped_samples()
-        );
+    if let Some((rate, dropped)) = system_stats {
+        println!("system tap: {rate} Hz, dropped samples: {dropped}");
     }
     Ok(())
 }
@@ -2236,7 +2264,7 @@ fn demo(state: &str) -> Result<()> {
             jay_agent::Depth::default(),
             levels,
             // Nothing behind a demo panel can finish, so it closes only by hand.
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            jay_ui::Closer::new(),
             [true, true],
         )
         .map_err(|e| anyhow::anyhow!("overlay: {e}"));
@@ -2309,7 +2337,7 @@ fn demo(state: &str) -> Result<()> {
         jay_agent::Depth::default(),
         levels,
         // Nothing behind a demo panel can finish, so it closes only by hand.
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        jay_ui::Closer::new(),
         [true, true],
     )
     .map_err(|e| anyhow::anyhow!("overlay: {e}"))

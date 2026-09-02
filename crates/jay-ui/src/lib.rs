@@ -169,6 +169,50 @@ pub enum Request {
     SetDepth(jay_agent::Depth),
 }
 
+/// Asks the panel to close itself, from a thread that is not the panel.
+///
+/// A bare flag is not enough, and the reason took a while to find. The panel
+/// only repaints when something asks it to, and over a quiet stretch macOS
+/// stops driving it altogether — so a flag it has to *notice* is never
+/// noticed. Observed exactly: the pipeline set the flag, the transcript was
+/// complete, and the window sat there for six minutes without once looking.
+///
+/// So this carries the panel's own context and knocks on the door. The flag
+/// says what to do and `request_repaint` guarantees somebody reads it.
+#[derive(Clone, Default)]
+pub struct Closer {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ctx: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
+}
+
+impl Closer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// End the session. Safe to call from any thread, and before the panel
+    /// exists — the flag is checked on the first frame either way.
+    pub fn close(&self) {
+        self.flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(ctx) = self.ctx.lock() {
+            if let Some(ctx) = ctx.as_ref() {
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn should_close(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn attach(&self, ctx: &egui::Context) {
+        if let Ok(mut slot) = self.ctx.lock() {
+            *slot = Some(ctx.clone());
+        }
+    }
+}
+
 /// Run the overlay. Blocks until the window is closed.
 // Nine things the panel cannot work out for itself, and a struct would move the
 // list somewhere else rather than shorten it. See the note on `Overlay::new`.
@@ -186,7 +230,7 @@ pub fn run(
     // written after this function returns, they are never written at all. A
     // 120-second session was observed still holding the window four minutes
     // later with its transcript complete and no notes beside it.
-    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    finished: Closer,
     // `expected` is which channels the session asked for, as `[mic, system]`.
     // Without it the panel cannot tell a channel that was never switched on
     // from one that was switched on and is delivering nothing, and those are
@@ -267,7 +311,7 @@ struct Overlay {
     expected: [bool; 2],
     /// Set by the pipeline when it stops on its own. Closes the window, which
     /// is what releases the notes.
-    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    finished: Closer,
     /// Displayed needle position per channel, and the frame count it was taken
     /// at. Held so the meter can fall smoothly rather than flickering at the
     /// frame rate, and so a stalled stream can be told from a silent one.
@@ -289,11 +333,16 @@ impl Overlay {
         mode: jay_agent::Mode,
         depth: jay_agent::Depth,
         levels: std::sync::Arc<jay_audio::Levels>,
-        finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        finished: Closer,
         expected: [bool; 2],
     ) -> Self {
         // Dark, translucent, and low contrast enough to sit over a terminal
         // without becoming the thing you look at.
+        // The panel's context, handed to whoever may need to wake it. Done
+        // before anything is drawn, so a pipeline that finishes during startup
+        // still gets its knock answered.
+        finished.attach(&cc.egui_ctx);
+
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = IRON;
         visuals.window_fill = IRON;
@@ -842,7 +891,7 @@ impl eframe::App for Overlay {
         // Checked before anything is drawn. The pipeline has stopped and the
         // notes are waiting on this function returning, so there is nothing to
         // be gained by holding the window open for one more frame.
-        if self.finished.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.finished.should_close() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
