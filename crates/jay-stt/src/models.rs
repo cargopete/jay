@@ -64,6 +64,17 @@ impl Model {
         }
     }
 
+    /// Was this model trained on English alone?
+    ///
+    /// True for every `.en` weight, which is all of them but `turbo`. It
+    /// matters because an English-only decoder handed a second of room tone
+    /// will sometimes reach outside the language it knows and emit a line of
+    /// Cyrillic or Spanish. On these weights that is proof of invention; on
+    /// `turbo` it might be somebody actually speaking Bulgarian.
+    pub fn english_only(self) -> bool {
+        !matches!(self, Model::Turbo)
+    }
+
     /// Approximate download size, so the wait can be explained rather than
     /// simply endured.
     pub fn approx_mb(self) -> u32 {

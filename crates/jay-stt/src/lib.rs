@@ -28,6 +28,12 @@ pub type Result<T> = std::result::Result<T, SttError>;
 #[derive(Debug, Clone)]
 pub struct Transcription {
     pub text: String,
+    /// An English-only decoder wrote something outside the Latin script.
+    ///
+    /// Computed where the model is known, like [`prompt_echo`](Self::prompt_echo),
+    /// because `judge` has no idea which weights produced the words it is
+    /// looking at and this is only evidence on the `.en` ones.
+    pub foreign_script: bool,
     /// How long inference took, which is the half of the latency budget that
     /// is actually ours to control.
     pub inference: Duration,
@@ -343,6 +349,8 @@ pub enum Rejected {
     TooBrief { spoken: Duration, peak: f32 },
     /// The same clause over and over: the decoder looping on near-silence.
     Looping,
+    /// An English-only decoder wrote something in another script.
+    ForeignScript,
 }
 
 impl Rejected {
@@ -360,7 +368,10 @@ impl Rejected {
     /// appears is indistinguishable from not having spoken.
     pub fn was_said(&self) -> bool {
         match self {
-            Rejected::KnownArtefact | Rejected::PrimingEcho | Rejected::Looping => false,
+            Rejected::KnownArtefact
+            | Rejected::PrimingEcho
+            | Rejected::Looping
+            | Rejected::ForeignScript => false,
             Rejected::TooQuiet { .. } | Rejected::Invented { .. } | Rejected::TooBrief { .. } => {
                 true
             }
@@ -381,6 +392,9 @@ impl Rejected {
                 spoken.as_secs_f32()
             ),
             Rejected::Looping => "the transcriber repeating itself".to_string(),
+            Rejected::ForeignScript => {
+                "an English-only model writing in another script".to_string()
+            }
         }
     }
 
@@ -416,8 +430,47 @@ impl Rejected {
             Rejected::Looping => {
                 format!("dropped the transcriber repeating itself: {text:?}")
             }
+            Rejected::ForeignScript => format!(
+                "dropped an English-only model writing in another script: {text:?}"
+            ),
         }
     }
+}
+
+/// Did an English-only decoder just write something that is not English?
+///
+/// Not a language check — a *script* check, which is a far blunter instrument
+/// and far harder to get wrong. An `.en` model has no business emitting
+/// Cyrillic, Greek, Arabic, Hebrew, or any of the CJK scripts, and when it does
+/// it is not transcribing, it is inventing. Observed on this machine, on the
+/// `you` channel of a session where nothing was said:
+///
+/// ```text
+/// [00:19–00:23] you: сака постова дажет неток
+/// ```
+///
+/// Deliberately permissive about Latin. Accented letters are ordinary in names
+/// — Paola, Miguel, Müller — and binning a line because somebody has a diaeresis
+/// in their surname would be a worse fault than the one being fixed.
+///
+/// Only ever applied when [`Model::english_only`](crate::models::Model::english_only)
+/// is true. On multilingual weights the same output might be a person speaking.
+pub fn is_foreign_script(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c as u32,
+            0x0370..=0x03FF   // Greek
+            | 0x0400..=0x04FF // Cyrillic
+            | 0x0530..=0x058F // Armenian
+            | 0x0590..=0x05FF // Hebrew
+            | 0x0600..=0x06FF // Arabic
+            | 0x0900..=0x097F // Devanagari
+            | 0x0E00..=0x0E7F // Thai
+            | 0x3040..=0x30FF // Kana
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK
+            | 0xAC00..=0xD7AF // Hangul
+        )
+    })
 }
 
 /// How many times one clause may repeat before the line is a decoder loop.
@@ -508,6 +561,9 @@ pub fn judge(
     if is_looping(&transcription.text) {
         return Some(Rejected::Looping);
     }
+    if transcription.foreign_script {
+        return Some(Rejected::ForeignScript);
+    }
     if speech_peak < SPEECH_PEAK_FLOOR {
         return Some(Rejected::TooQuiet { peak: speech_peak });
     }
@@ -535,6 +591,7 @@ mod tests {
     fn spoken(text: &str, no_speech: f32, confidence: f32) -> Transcription {
         Transcription {
             text: text.to_string(),
+            foreign_script: false,
             inference: Duration::from_millis(1),
             no_speech,
             confidence,
@@ -550,6 +607,38 @@ mod tests {
     /// said and nothing was playing.
     const LOOP: &str = "I'm not sure what to say. I'm not sure what to say. I'm not \
         sure what to say. I'm not sure what to say. I'm not sure what to say.";
+
+    /// Real lines an English-only decoder produced with nothing to transcribe.
+    #[test]
+    fn an_english_model_writing_cyrillic_is_inventing() {
+        assert!(is_foreign_script("сака постова дажет неток"));
+        assert!(is_foreign_script("私は日本語を話します"));
+        assert_eq!(
+            judge(
+                &Transcription {
+                    foreign_script: true,
+                    ..spoken("сака постова дажет неток", 0.0, 0.9)
+                },
+                0.5,
+                SAID
+            ),
+            Some(Rejected::ForeignScript)
+        );
+    }
+
+    /// Accented Latin is ordinary in names, and binning a line because somebody
+    /// has a diaeresis in their surname would be the worse fault.
+    #[test]
+    fn accented_names_are_not_a_foreign_script() {
+        for line in [
+            "Paola said she would look at it",
+            "Miguel and Müller are both on the call",
+            "the café deployment is behind",
+            "El Niño is the example we always use",
+        ] {
+            assert!(!is_foreign_script(line), "rejected real speech: {line:?}");
+        }
+    }
 
     #[test]
     fn the_word_html_namespace_is_an_artefact() {

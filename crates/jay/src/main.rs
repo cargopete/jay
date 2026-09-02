@@ -247,6 +247,13 @@ enum Command {
         /// Where to write them. Defaults to `<session>.notes.md`.
         #[arg(short, long)]
         out: Option<std::path::PathBuf>,
+        /// Who was on the call, comma separated.
+        ///
+        /// The only thing that can put a name on the far side, which is
+        /// otherwise `them` however many people were there. Falls back to
+        /// `~/.config/jay/attendees`.
+        #[arg(long)]
+        attendees: Option<String>,
     },
 }
 
@@ -350,6 +357,14 @@ struct TranscribeArgs {
     /// tool rather than a setting. See IMPROVEMENTS.md.
     #[arg(long, value_enum, default_value_t = MicPath::Plain)]
     mic_path: MicPath,
+
+    /// Who is on the call, comma separated.
+    ///
+    /// Primed into the decoder so their names come back spelled right, and
+    /// given to the notes so the far side can be attributed rather than being
+    /// six people all called `them`. Falls back to `~/.config/jay/attendees`.
+    #[arg(long)]
+    attendees: Option<String>,
 
     /// Transcribe the microphone even while the far side is speaking.
     ///
@@ -486,11 +501,17 @@ fn run() -> Result<()> {
             };
             transcribe(&args, brief)
         }
-        Command::Notes { path, model, out } => {
+        Command::Notes {
+            path,
+            model,
+            out,
+            attendees,
+        } => {
+            let roster = resolve_attendees(attendees.as_deref());
             let out = out.unwrap_or_else(|| jay_agent::notes::path_for(&path));
             let transcript = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let notes = jay_agent::notes::write(&transcript, &model)
+            let notes = jay_agent::notes::write(&transcript, &model, roster.as_deref())
                 .context("writing the meeting notes")?;
             std::fs::write(&out, &notes.markdown)
                 .with_context(|| format!("writing {}", out.display()))?;
@@ -606,6 +627,10 @@ fn transcribe_file(path: &std::path::Path, model: Model) -> Result<()> {
 fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
     stop_politely_on_interrupt();
     let source = args.source;
+    // Resolved once, used twice: primed into the decoder so the names come back
+    // spelled right, and handed to the notes so the far side can be attributed
+    // rather than being however-many-people all called `them`.
+    let roster = resolve_attendees(args.attendees.as_deref());
     // Read once, up front, so the session can say so before it starts rather
     // than after it has already heard everything.
     let notes_at_the_end = !args.no_notes;
@@ -703,7 +728,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
             None,
             brief,
             levels,
-            resolve_vocab(args.vocab.as_deref()),
+            session_vocabulary(roster.as_deref(), resolve_vocab(args.vocab.as_deref())),
             epoch,
             notes_at_the_end,
             args.mic_path,
@@ -715,7 +740,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         if let Some(written) = written {
             report(&written, &archived);
             if !args.no_notes && written.spoken + written.unsure > 0 {
-                notes_for_session(&archived, &args.notes_model);
+                notes_for_session(&archived, &args.notes_model, roster.as_deref());
             }
         }
         return result;
@@ -740,7 +765,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         args.device.clone(),
         args.model,
         args.seconds,
-        resolve_vocab(args.vocab.as_deref()),
+        session_vocabulary(roster.as_deref(), resolve_vocab(args.vocab.as_deref())),
         args.mic_path,
         !args.no_echo_gate,
     );
@@ -809,7 +834,7 @@ fn transcribe(args: &TranscribeArgs, brief: Option<String>) -> Result<()> {
         // notes still land on disk beside the session, which is where they
         // were always going to be read from.
         if !args.no_notes && written.spoken + written.unsure > 0 {
-            notes_for_session(&archived, &args.notes_model);
+            notes_for_session(&archived, &args.notes_model, roster.as_deref());
         }
     }
     closed
@@ -833,7 +858,7 @@ fn describe(notes: &jay_agent::notes::Notes, out: &std::path::Path) -> String {
 /// Never fatal. The session is already on disk and is the thing that mattered;
 /// a summariser that could take the recording down with it would be a bad
 /// trade at any price. Every failure here is one printed line.
-fn notes_for_session(path: &std::path::Path, model: &str) {
+fn notes_for_session(path: &std::path::Path, model: &str, roster: Option<&str>) {
     let transcript = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) => {
@@ -842,7 +867,7 @@ fn notes_for_session(path: &std::path::Path, model: &str) {
         }
     };
     println!("\nwriting the notes…");
-    match jay_agent::notes::write(&transcript, model) {
+    match jay_agent::notes::write(&transcript, model, roster) {
         Ok(notes) => {
             let out = jay_agent::notes::path_for(path);
             if let Err(e) = std::fs::write(&out, &notes.markdown) {
@@ -869,6 +894,51 @@ fn expand_vocab(vocab: &str) -> String {
         return jay_stt::whisper::INTERVIEW_VOCABULARY.to_string();
     }
     vocab.to_string()
+}
+
+/// Who is expected on the call.
+///
+/// Two jobs from one list, which is why it is its own flag rather than more
+/// `--vocab`. The names are primed into the decoder, because `Petrino` for
+/// `Patroni` is what an unprimed proper noun looks like. And they are handed to
+/// the notes, which is the only thing that can tell one voice on the far side
+/// from another: jay's channel separation is physical, so six people are all
+/// `them`, and a roster is the difference between "someone said" and a name.
+///
+/// `--attendees` for today's, `~/.config/jay/attendees` for the standing team.
+fn session_vocabulary(attendees: Option<&str>, vocab: Option<String>) -> Option<String> {
+    // Names first. The priming prompt conditions what follows it, and the
+    // proper nouns are the part the decoder is worst at and the part a reader
+    // most needs right.
+    match (attendees, vocab) {
+        (Some(names), Some(words)) => Some(format!("{names}, {words}")),
+        (Some(names), None) => Some(names.to_string()),
+        (None, words) => words,
+    }
+}
+
+fn resolve_attendees(flag: Option<&str>) -> Option<String> {
+    if let Some(list) = flag {
+        let trimmed = list.trim();
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+    }
+    let path = std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("jay")
+            .join("attendees")
+    })?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let names: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    tracing::info!(path = %path.display(), count = names.len(), "roster loaded");
+    Some(names.join(", "))
 }
 
 /// Where a standing vocabulary lives when none is given on the command line.
@@ -2521,7 +2591,7 @@ fn check(out: &std::path::Path) -> Result<()> {
     // A transcript in the archive's own shape, so this exercises the real path
     // rather than a preflight special case.
     let probe = "# jay session\n\n[00:00–00:04] them: right, we will ship on Friday\n";
-    match jay_agent::notes::write(probe, jay_agent::notes::DEFAULT_MODEL) {
+    match jay_agent::notes::write(probe, jay_agent::notes::DEFAULT_MODEL, None) {
         Ok(n) => note(format!(
             "  notes     OK   {} in {:.1}s, {} prompt tokens, ${:.4}",
             n.model,

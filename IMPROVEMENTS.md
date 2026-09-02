@@ -203,6 +203,29 @@ attendees up front and have the notes say "someone on the call" rather than
 `them`, which at least stops the notes reading as though there were two people
 in every meeting.
 
+**Built, and it does better than the middle ground.** `--attendees`, falling back
+to `~/.config/jay/attendees`. The roster is appended to the notes system prompt
+— appended, so the standing instructions stay byte-identical and cacheable — and
+the model is told to use a name *only* where the transcript makes the speaker
+plain, and to keep `them` everywhere else.
+
+Run against the 72-minute seven-person weekly, which is the hardest case
+available:
+
+| | without a roster | with one |
+| --- | --- | --- |
+| named far-side actions | 0 | 4 |
+| bare `them` actions | all of them | 5 |
+| wrong names | — | none found |
+
+The transcript itself is unchanged and still says `them` throughout. This puts
+names on the document somebody reads, not on the audio, and it is honest about
+which of the two it is doing.
+
+The remaining ergonomic gap is that the roster has to be typed or maintained by
+hand. Pulling it off the calendar event that is running now is the version that
+would actually be used every time.
+
 ### 8. Per-meeting vocabulary is manual
 
 `--vocab "names, products, jargon"` has to be typed for every session and is
@@ -227,6 +250,10 @@ since a roster is exactly what contextual attribution needs.
 Ideas without evidence behind them yet. Move them up when a session earns it.
 
 - ~~Fabricated `you:` lines in a real room.~~ **Confirmed, moved to item 15.**
+- One-off fabrications that neither repeat nor change script are still not
+  caught, and are the last of this family. `I don't believe in gay.` came out of
+  a silent room, reads as ordinary English, and clears every filter jay has.
+  There may be no cheap signal for it.
 - Resident memory read 304 MB during this session against 1.87 GB documented in
   the README. Either the figure has moved or the model is mapped rather than
   resident. Not a problem either way, but the README should not be quoting a
@@ -338,6 +365,36 @@ good. Very good."` are all real lines from real transcripts on this machine, and
 all three survive. Clauses under twelve characters are ignored entirely, because
 "Ah. Ah. Ah. Ah." is a person reacting and binning it would be editing the
 meeting rather than transcribing it.
+
+---
+
+### 16. An English-only decoder writing in another script
+
+The other half of item 15, and it has an even sharper tell. Observed on the same
+machine, on a `you` channel with nothing being said:
+
+```
+[00:19–00:23] you: сака постова дажет неток
+[00:54–00:55] you: El cadet es me das trilis.
+```
+
+`medium.en` has no business emitting Cyrillic. When it does, it is not
+transcribing, it is inventing.
+
+**Fixed.** `jay_stt::is_foreign_script`, a seventh `Rejected` variant. A *script*
+check rather than a language one, because script is blunt and hard to get wrong:
+Cyrillic, Greek, Arabic, Hebrew, Armenian, Devanagari, Thai, Kana, Hangul and CJK
+are all rejected, and Latin is left entirely alone. Accented letters are ordinary
+in names — Paola, Müller, café — and binning a line over a diaeresis would be a
+worse fault than the one being fixed.
+
+Applied only when the weights are English-only, which is every model jay wires up
+except `turbo`. On multilingual weights the same output might be somebody
+actually speaking Bulgarian, and the flag is computed where the model is known
+rather than in `judge`, which cannot see it.
+
+Note what this does *not* catch: `El cadet es me das trilis` is Latin script, so
+it survives. The Cyrillic case is closed and the Romance-language case is not.
 
 ---
 

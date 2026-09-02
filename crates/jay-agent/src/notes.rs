@@ -174,7 +174,7 @@ Reply with markdown only, no preamble, in exactly this shape:
 ///
 /// The result is a model that has been told one thing — how to write meeting
 /// notes — and nothing about being an agent in a repository.
-fn shed_the_agent(command: &mut Command, model: &str) {
+fn shed_the_agent(command: &mut Command, model: &str, system: &str) {
     command
         .arg("--print")
         .arg("--model")
@@ -182,7 +182,7 @@ fn shed_the_agent(command: &mut Command, model: &str) {
         .arg("--output-format")
         .arg("json")
         .arg("--system-prompt")
-        .arg(SYSTEM)
+        .arg(system)
         .arg("--disallowed-tools")
         .arg(SHED)
         // Belt and braces: nothing may be called even if a name above has
@@ -200,7 +200,7 @@ fn shed_the_agent(command: &mut Command, model: &str) {
 /// `transcript` is the archive file's contents, header and all: the header
 /// explains the stamp format and the `?` convention, so it is cheaper to send
 /// it than to restate it.
-pub fn write(transcript: &str, model: &str) -> Result<Notes> {
+pub fn write(transcript: &str, model: &str, roster: Option<&str>) -> Result<Notes> {
     // A transcript of nothing produces a page of confident nothing, which is
     // the single most expensive way to be wrong here.
     if !has_speech(transcript) {
@@ -214,7 +214,29 @@ pub fn write(transcript: &str, model: &str) -> Result<Notes> {
     // directory and will happily reach for whatever repository it is standing
     // in; point jay at a client's codebase and that becomes a leak.
     command.current_dir(std::env::temp_dir());
-    shed_the_agent(&mut command, model);
+
+    // The roster is appended rather than woven in, so the standing instructions
+    // are byte-identical from session to session and stay cacheable.
+    //
+    // It is the only thing that can put a name on the far side. jay's channel
+    // separation is physical — one microphone each way — so six people on a
+    // call are six people called `them`, and no amount of prompting recovers
+    // from that on its own. Given who was in the room, a name can be *inferred*
+    // where the transcript makes it plain: somebody introduces themselves,
+    // somebody is handed the floor by name, somebody is answered by name.
+    // Everywhere else it stays `them`, and rule 4 above is unchanged for a
+    // reason — a confidently wrong name is worse than an honest `them`.
+    let system = match roster {
+        Some(names) => format!(
+            "{SYSTEM}\n\nExpected on this call: {names}.\nUse these names for the \
+             far side ONLY where the transcript makes it plain who was speaking — \
+             they introduce themselves, they are handed the floor by name, or they \
+             are answered by name. Everywhere else keep `them`. A name you inferred \
+             from topic or manner is a guess, and a guess here is worse than `them`."
+        ),
+        None => SYSTEM.to_string(),
+    };
+    shed_the_agent(&mut command, model, &system);
 
     let mut child = command
         .stdin(Stdio::piped())
@@ -358,7 +380,7 @@ mod tests {
         );
         assert!(!has_speech(&silent));
         assert!(matches!(
-            write(&silent, DEFAULT_MODEL).unwrap_err(),
+            write(&silent, DEFAULT_MODEL, None).unwrap_err(),
             NotesError::Empty
         ));
     }
@@ -389,7 +411,7 @@ mod tests {
         let heard = format!("{HEADER}[00:21–00:33] them: the problem is a rate limiter\n");
         // SAFETY: single-threaded test, and the value is restored below.
         unsafe { std::env::set_var("JAY_CLAUDE_BIN", "jay-no-such-binary") };
-        let err = write(&heard, DEFAULT_MODEL).unwrap_err();
+        let err = write(&heard, DEFAULT_MODEL, None).unwrap_err();
         unsafe { std::env::remove_var("JAY_CLAUDE_BIN") };
         assert!(matches!(err, NotesError::Spawn(_)), "{err}");
     }

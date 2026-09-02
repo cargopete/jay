@@ -1,11 +1,11 @@
 [package]
 name = "jay-ui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 crossbeam-channel.workspace = true
 jay-audio.workspace = true
-jay-agent = { version = "0.1.0", path = "../jay-agent" }
+jay-agent = { version = "0.2.0", path = "../jay-agent" }
 eframe = "0.36.1"
 egui = "0.36.1"

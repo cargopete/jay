@@ -15,6 +15,13 @@ use crate::{Result, SpeechModel, SttError, Transcription, models};
 const MIN_SAMPLES: usize = 16_000;
 
 pub struct Whisper {
+    /// Whether these weights know only English, read off the model name.
+    ///
+    /// Kept because whether a line in another script is evidence of invention
+    /// depends entirely on it: on `medium.en` a sentence of Cyrillic is proof
+    /// the decoder was inventing, and on `large-v3-turbo` it might be somebody
+    /// actually speaking Bulgarian.
+    english_only: bool,
     /// `WhisperState` holds an `Arc` of the inner context, so it keeps the
     /// model alive on its own and there is nothing else to store here.
     state: WhisperState,
@@ -88,6 +95,7 @@ impl Whisper {
 
         tracing::info!(%name, threads, "whisper ready");
         Ok(Self {
+            english_only: name.ends_with(".en"),
             state,
             threads,
             name,
@@ -190,8 +198,13 @@ impl SpeechModel for Whisper {
         // `--vocab` is checked against its own words rather than the defaults.
         let prompt_echo = crate::is_prompt_echo(&text, self.vocabulary);
 
+        // Only evidence on English-only weights, which is why it is decided
+        // here rather than in `judge`.
+        let foreign_script = self.english_only && crate::is_foreign_script(&text);
+
         Ok(Transcription {
             prompt_echo,
+            foreign_script,
             text,
             inference: started.elapsed(),
             no_speech,

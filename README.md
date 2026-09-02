@@ -234,6 +234,7 @@ jay --muted --mode coding --brief brief.md --vocab "union-find, Patroni"
 | `--save` | Override where the session is archived. |
 | `--model` | `tiny`, `base`, `small`, `medium`, `turbo`. Default `medium`. |
 | `--vocab` | Extra words to expect, comma separated. Falls back to `~/.config/jay/vocab`. `--vocab interview` loads the built-in algorithms list. |
+| `--attendees` | Who is on the call, comma separated. Primes their names and lets the notes attribute the far side. Falls back to `~/.config/jay/attendees`. |
 | `--no-echo-gate` | Transcribe your microphone even while the other side is speaking. Off the gate goes; wear headphones. |
 | `--mic-path` | `plain`, `aec`, `bypass`. A measurement tool, not a setting — `aec` loses the `them` channel. |
 | `--no-notes` | Do not write the meeting notes when the session ends. |
@@ -893,10 +894,30 @@ decoder gave up and recited the prompt back, so the transcript contains a
 sentence about binary trees that nobody said. Both are fixed; both had been in
 the tree for months, doing this quietly, on every session.
 
-**Everyone on the far side is `them`.** One person or six, jay cannot tell,
-because the separation it has is physical — two microphones — rather than
-acoustic. Splitting the far side needs real diarization and is a different
-project.
+**Everyone on the far side is `them` in the transcript.** One person or six, jay
+cannot tell, because the separation it has is physical — two microphones —
+rather than acoustic. Splitting the far side in the *audio* needs real
+diarization and is a different project.
+
+The **notes** can now do better, given a roster. `--attendees "Paola, Ben, Alex"`
+(or `~/.config/jay/attendees`) does two things: primes the decoder so the names
+come back spelled right, and tells the notes who was in the room. Names are then
+used only where the transcript makes it plain who was speaking — somebody
+introduces themselves, is handed the floor by name, or is answered by name — and
+everywhere else it stays `them`. On the 72-minute seven-person weekly that turns
+
+```
+- **them** — push the contract-service PR for review [20:08]
+```
+
+into
+
+```
+- **them (Ben)** — push the contract-service PR for review [20:08]
+```
+
+A name inferred from topic or manner is a guess, and the prompt says so at
+length, because a confidently wrong name is worse than an honest `them`.
 
 **The mute switch needs a mouse.** Clicking it means focusing the panel
 mid-meeting, which is exactly when you do not want to be hunting for a window.
